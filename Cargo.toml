@@ -1,12 +1,12 @@
 [package]
-authors = ["Solana Maintainers <maintainers@solana.foundation>"]
+authors = ["Maintainers <dev@supercult.com>"]
 edition = "2021"
-name = "agave-geyser-plugin-postgres"
+name = "jacana"
 description = "The Solana AccountsDb plugin for PostgreSQL database."
-version = "2.1.16"
-repository = "https://github.com/anza-xyz/agave-geyser-plugin-postgres"
+version = "0.1.0"
+repository = "https://github.com/jbowa/jacana"
 license = "Apache-2.0"
-homepage = "https://solana.com/"
+homepage = "supercult.com"
 documentation = "https://docs.rs/solana-validator"
 
 [lib]
