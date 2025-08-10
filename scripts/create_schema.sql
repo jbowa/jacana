@@ -1,9 +1,8 @@
 /**
- * This plugin implementation for PostgreSQL requires the following tables
+ * Required tables for Postgres plugin
  */
+
 -- The table storing accounts
-
-
 CREATE TABLE account (
     pubkey BYTEA PRIMARY KEY,
     owner BYTEA,
@@ -18,7 +17,6 @@ CREATE TABLE account (
 );
 
 CREATE INDEX account_owner ON account (owner);
-
 CREATE INDEX account_slot ON account (slot);
 
 -- The table storing slot information
@@ -30,8 +28,7 @@ CREATE TABLE slot (
 );
 
 -- Types for Transactions
-
-Create TYPE "TransactionErrorCode" AS ENUM (
+CREATE TYPE "TransactionErrorCode" AS ENUM (
     'AccountInUse',
     'AccountLoadedTwice',
     'AccountNotFound',
@@ -94,10 +91,12 @@ CREATE TYPE "TransactionTokenBalance" AS (
     account_index SMALLINT,
     mint VARCHAR(44),
     ui_token_amount DOUBLE PRECISION,
-    owner VARCHAR(44)
+    owner VARCHAR(44),
+    amount BIGINT,
+    decimals SMALLINT
 );
 
-Create TYPE "RewardType" AS ENUM (
+CREATE TYPE "RewardType" AS ENUM (
     'Fee',
     'Rent',
     'Staking',
@@ -161,12 +160,22 @@ CREATE TYPE "LoadedMessageV0" AS (
     loaded_addresses "LoadedAddresses"
 );
 
+CREATE TYPE "TransactionType" AS ENUM (
+    'Buy',
+    'Sell', 
+    'Swap',
+    'Transfer',
+    'Mint',
+    'Burn'
+);
+
 -- The table storing transactions
 CREATE TABLE transaction (
+    index BIGINT NOT NULL,
     slot BIGINT NOT NULL,
     signature BYTEA NOT NULL,
     is_vote BOOL NOT NULL,
-    message_type SMALLINT, -- 0: legacy, 1: v0 message
+    message_type SMALLINT,
     legacy_message "TransactionMessage",
     v0_loaded_message "LoadedMessageV0",
     signatures BYTEA[],
@@ -174,9 +183,32 @@ CREATE TABLE transaction (
     meta "TransactionStatusMeta",
     write_version BIGINT,
     updated_on TIMESTAMP NOT NULL,
-    index BIGINT NOT NULL,
-    CONSTRAINT transaction_pk PRIMARY KEY (slot, signature)
+    token_account TEXT,
+    token_owner TEXT,
+    token_mint TEXT,
+    transaction_type "TransactionType",
+    account_index SMALLINT,
+    pre_balance BIGINT,
+    post_balance BIGINT,
+    sol_amount BIGINT,
+    token_pre_amount BIGINT,
+    token_post_amount BIGINT,
+    token_delta BIGINT,
+
+    CONSTRAINT transaction_pk PRIMARY KEY (slot, signature, index)
 );
+
+CREATE UNIQUE INDEX transaction_basic_pk ON transaction (slot, signature);
+
+CREATE INDEX transaction_token_mint ON transaction (token_mint) WHERE token_mint IS NOT NULL;
+CREATE INDEX transaction_token_owner ON transaction (token_owner) WHERE token_owner IS NOT NULL;
+CREATE INDEX transaction_updated_on ON transaction (updated_on);
+CREATE INDEX transaction_slot ON transaction (slot);
+CREATE INDEX transaction_type ON transaction (transaction_type) WHERE transaction_type IS NOT NULL;
+
+CREATE INDEX transaction_mint_time ON transaction (token_mint, updated_on DESC) WHERE token_mint IS NOT NULL;
+CREATE INDEX transaction_owner_mint ON transaction (token_owner, token_mint) WHERE token_owner IS NOT NULL;
+CREATE INDEX transaction_mint_type ON transaction (token_mint, transaction_type) WHERE token_mint IS NOT NULL;
 
 -- The table storing block metadata
 CREATE TABLE block (
@@ -225,8 +257,7 @@ CREATE TABLE account_audit (
     txn_signature BYTEA
 );
 
-CREATE INDEX account_audit_account_key ON  account_audit (pubkey, write_version);
-
+CREATE INDEX account_audit_account_key ON account_audit (pubkey, write_version);
 CREATE INDEX account_audit_pubkey_slot ON account_audit (pubkey, slot);
 
 CREATE FUNCTION audit_account_update() RETURNS trigger AS $audit_account_update$

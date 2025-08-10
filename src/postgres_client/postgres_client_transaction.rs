@@ -1,5 +1,5 @@
-/// Module responsible for handling persisting transaction data to the PostgreSQL
-/// database.
+/// Module responsible for handling persisting transaction data to the
+/// PostgreSQL database.
 use {
     crate::{
         geyser_plugin_postgres::{GeyserPluginPostgresConfig, GeyserPluginPostgresError},
@@ -19,6 +19,7 @@ use {
             v0::{self, LoadedAddresses, MessageAddressTableLookup},
             Message, MessageHeader, SanitizedMessage,
         },
+        pubkey::Pubkey,
         transaction::TransactionError,
     },
     solana_transaction_status::{
@@ -51,6 +52,8 @@ pub struct DbTransactionTokenBalance {
     pub mint: String,
     pub ui_token_amount: Option<f64>,
     pub owner: String,
+    pub amount: Option<i64>,
+    pub decimals: Option<i16>,
 }
 
 #[derive(Clone, Debug, Eq, FromSql, ToSql, PartialEq)]
@@ -135,6 +138,17 @@ pub struct DbLoadedMessageV0 {
     pub loaded_addresses: DbLoadedAddresses,
 }
 
+#[derive(Clone, Debug, FromSql, ToSql)]
+#[postgres(name = "TransactionType")]
+pub enum TransactionType {
+    Buy,
+    Sell,
+    Swap,
+    Transfer,
+    Mint,
+    Burn,
+}
+
 pub struct DbTransaction {
     pub signature: Vec<u8>,
     pub is_vote: bool,
@@ -150,6 +164,17 @@ pub struct DbTransaction {
     /// before transactions with higher write_versions in a shred.
     pub write_version: i64,
     pub index: i64,
+    pub token_account: Option<String>,
+    pub token_owner: Option<String>,
+    pub token_mint: Option<String>,
+    pub transaction_type: Option<TransactionType>,
+    pub pre_balance: Option<i64>,
+    pub post_balance: Option<i64>,
+    pub sol_amount: Option<i64>,
+    pub account_index: Option<i16>,
+    pub token_pre_amount: Option<i64>,
+    pub token_post_amount: Option<i64>,
+    pub token_delta: Option<i64>,
 }
 
 pub struct LogTransactionRequest {
@@ -456,12 +481,21 @@ fn get_transaction_error(result: &Result<(), TransactionError>) -> Option<DbTran
 }
 
 impl From<&TransactionTokenBalance> for DbTransactionTokenBalance {
-    fn from(token_balance: &TransactionTokenBalance) -> Self {
+    fn from(tb: &TransactionTokenBalance) -> Self {
+        let amount_i64 = tb
+            .ui_token_amount
+            .amount
+            .parse::<i128>()
+            .ok()
+            .and_then(|v| i64::try_from(v).ok());
+
         Self {
-            account_index: token_balance.account_index as i16,
-            mint: token_balance.mint.clone(),
-            ui_token_amount: token_balance.ui_token_amount.ui_amount,
-            owner: token_balance.owner.clone(),
+            account_index: tb.account_index as i16,
+            mint: tb.mint.clone(),
+            ui_token_amount: tb.ui_token_amount.ui_amount,
+            owner: tb.owner.clone(),
+            amount: amount_i64,
+            decimals: Some(tb.ui_token_amount.decimals as i16),
         }
     }
 }
@@ -506,11 +540,176 @@ impl From<&TransactionStatusMeta> for DbTransactionStatusMeta {
     }
 }
 
+fn effective_account_keys(msg: &SanitizedMessage) -> Vec<Pubkey> {
+    match msg {
+        SanitizedMessage::Legacy(legacy) => legacy.message.account_keys.clone(),
+        SanitizedMessage::V0(v0) => {
+            // v0: static keys + loaded address table entries (writable then readonly)
+            let mut keys = v0.message.account_keys.clone();
+            keys.extend_from_slice(v0.loaded_addresses.writable.as_slice());
+            keys.extend_from_slice(v0.loaded_addresses.readonly.as_slice());
+            keys
+        }
+    }
+}
+
+fn lamports_for_idx(meta: &DbTransactionStatusMeta, idx: usize) -> (Option<i64>, Option<i64>) {
+    let pre = meta.pre_balances.get(idx).copied();
+    let post = meta.post_balances.get(idx).copied();
+
+    (pre, post)
+}
+
+fn token_amounts_for_idx(
+    meta: &DbTransactionStatusMeta,
+    account_index: i16,
+) -> (Option<i64>, Option<i64>, Option<i16>) {
+    let pre = meta.pre_token_balances.as_ref().and_then(|v| {
+        v.iter()
+            .find(|b| b.account_index == account_index)
+            .and_then(|b| b.amount)
+    });
+
+    let post = meta.post_token_balances.as_ref().and_then(|v| {
+        v.iter()
+            .find(|b| b.account_index == account_index)
+            .and_then(|b| b.amount)
+    });
+
+    let decimals = meta
+        .post_token_balances
+        .as_ref()
+        .and_then(|v| {
+            v.iter()
+                .find(|b| b.account_index == account_index)
+                .and_then(|b| b.decimals)
+        })
+        .or_else(|| {
+            meta.pre_token_balances.as_ref().and_then(|v| {
+                v.iter()
+                    .find(|b| b.account_index == account_index)
+                    .and_then(|b| b.decimals)
+            })
+        });
+
+    (pre, post, decimals)
+}
+
+fn token_delta_for_row(
+    meta: &DbTransactionStatusMeta,
+    idx: i16,
+) -> (Option<i64>, Option<i64>, Option<i64>, Option<i16>) {
+    let (pre, post, decimals) = token_amounts_for_idx(meta, idx);
+    let delta = post
+        .zip(pre)
+        .and_then(|(po, pr)| po.checked_sub(pr))
+        .or_else(|| post.map(|po| po))
+        .or_else(|| pre.map(|pr| -pr));
+
+    (pre, post, delta, decimals)
+}
+
+fn signer_token_row<'a>(
+    meta: &'a DbTransactionStatusMeta,
+    signer_owner: &str,
+) -> Option<(
+    &'a DbTransactionTokenBalance,
+    i64,
+    Option<i64>,
+    Option<i64>,
+    Option<i16>,
+)> {
+    // Look across post first, then pre (covers created accounts).
+    let iter = meta
+        .post_token_balances
+        .as_deref()
+        .into_iter()
+        .flatten()
+        .chain(meta.pre_token_balances.as_deref().into_iter().flatten());
+
+    let mut best: Option<(
+        &'a DbTransactionTokenBalance,
+        i64,
+        Option<i64>,
+        Option<i64>,
+        Option<i16>,
+    )> = None;
+    for b in iter {
+        if b.owner != signer_owner {
+            continue;
+        }
+        let (pre, post, delta_opt, decimals) = token_delta_for_row(meta, b.account_index);
+        let delta = delta_opt.unwrap_or(0);
+        // Choose the signer-owned row with the largest absolute movement
+        if best.map_or(true, |(_, d, _, _, _)| d.abs() < delta.abs()) {
+            best = Some((b, delta, pre, post, decimals));
+        }
+    }
+    best
+}
+
+fn classify_tx_type(sol_delta: Option<i64>, token_delta: Option<i64>) -> TransactionType {
+    match (sol_delta, token_delta) {
+        (Some(sol), Some(tok)) if sol < 0 && tok > 0 => TransactionType::Buy,
+        (Some(sol), Some(tok)) if sol > 0 && tok < 0 => TransactionType::Sell,
+        _ => TransactionType::Transfer,
+    }
+}
+
 fn build_db_transaction(
     slot: u64,
     transaction_info: &ReplicaTransactionInfoV2,
     transaction_write_version: u64,
 ) -> DbTransaction {
+    let meta = DbTransactionStatusMeta::from(transaction_info.transaction_status_meta);
+    let msg = transaction_info.transaction.message();
+    let signer = match msg {
+        SanitizedMessage::Legacy(legacy) => legacy.message.account_keys[0].to_string(),
+        SanitizedMessage::V0(v0) => v0.message.account_keys[0].to_string(),
+    };
+
+    let (pre_balance, post_balance) = lamports_for_idx(&meta, 0);
+    let sol_amount = post_balance
+        .zip(pre_balance)
+        .and_then(|(po, pr)| po.checked_sub(pr));
+
+    let (
+        token_account,
+        token_owner,
+        token_mint,
+        account_index,
+        token_pre_amount,
+        token_post_amount,
+        token_delta,
+    ) = if let Some((row, delta, pre, post, _dec)) = signer_token_row(&meta, &signer) {
+        let token_account = effective_account_keys(msg)
+            .get(row.account_index as usize)
+            .map(|k| k.to_string());
+
+        (
+            token_account,
+            Some(row.owner.clone()),
+            Some(row.mint.clone()),
+            Some(row.account_index),
+            pre,
+            post,
+            Some(delta),
+        )
+    } else {
+        (None, None, None, None, None, None, None)
+    };
+
+    let mut transaction_type = classify_tx_type(sol_amount, token_delta);
+    if matches!(transaction_type, TransactionType::Transfer) && token_delta.is_none() {
+        if let Some(logs) = &meta.log_messages {
+            if logs.iter().any(|l| {
+                l.contains("Instruction: InitializeMint") || l.contains("Instruction: MintTo")
+            }) {
+                transaction_type = TransactionType::Mint;
+            }
+        }
+    }
+
     DbTransaction {
         signature: transaction_info.signature.as_ref().to_vec(),
         is_vote: transaction_info.is_vote,
@@ -540,9 +739,20 @@ fn build_db_transaction(
             .message_hash()
             .as_ref()
             .to_vec(),
-        meta: DbTransactionStatusMeta::from(transaction_info.transaction_status_meta),
+        meta,
         write_version: transaction_write_version as i64,
         index: transaction_info.index as i64,
+        token_account,
+        token_owner,
+        token_mint,
+        transaction_type: Some(transaction_type),
+        pre_balance,
+        post_balance,
+        sol_amount,
+        token_pre_amount,
+        token_post_amount,
+        token_delta,
+        account_index,
     }
 }
 
@@ -551,22 +761,59 @@ impl SimplePostgresClient {
         client: &mut Client,
         config: &GeyserPluginPostgresConfig,
     ) -> Result<Statement, GeyserPluginError> {
-        let stmt = "INSERT INTO transaction AS txn (signature, is_vote, slot, message_type, legacy_message, \
-        v0_loaded_message, signatures, message_hash, meta, write_version, index, updated_on) \
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
-        ON CONFLICT (slot, signature) DO UPDATE SET is_vote=excluded.is_vote, \
-        message_type=excluded.message_type, \
-        legacy_message=excluded.legacy_message, \
-        v0_loaded_message=excluded.v0_loaded_message, \
-        signatures=excluded.signatures, \
-        message_hash=excluded.message_hash, \
-        meta=excluded.meta, \
-        write_version=excluded.write_version, \
-        index=excluded.index,
-        updated_on=excluded.updated_on";
+        let stmt = "INSERT INTO transaction AS txn (
+            signature,
+            is_vote,
+            slot,
+            message_type,
+            legacy_message,
+            v0_loaded_message,
+            signatures,
+            message_hash,
+            meta,
+            write_version,
+            index,
+            updated_on,
+            token_account,
+            token_owner,
+            token_mint,
+            transaction_type,
+            pre_balance,
+            post_balance,
+            sol_amount,
+            account_index,
+            token_pre_amount,
+            token_post_amount,
+            token_delta
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+            $12, $13, $14, $15, $16, $17, $18, $19, $20,
+            $21, $22, $23
+        )
+        ON CONFLICT (slot, signature, index) DO UPDATE SET
+            is_vote = excluded.is_vote,
+            message_type = excluded.message_type,
+            legacy_message = excluded.legacy_message,
+            v0_loaded_message = excluded.v0_loaded_message,
+            signatures = excluded.signatures,
+            message_hash = excluded.message_hash,
+            meta = excluded.meta,
+            write_version = excluded.write_version,
+            index = excluded.index,
+            updated_on = excluded.updated_on,
+            token_account = excluded.token_account,
+            token_owner = excluded.token_owner,
+            token_mint = excluded.token_mint,
+            transaction_type = excluded.transaction_type,
+            pre_balance = excluded.pre_balance,
+            post_balance = excluded.post_balance,
+            sol_amount = excluded.sol_amount,
+            account_index = excluded.account_index,
+            token_pre_amount = excluded.token_pre_amount,
+            token_post_amount = excluded.token_post_amount,
+            token_delta = excluded.token_delta";
 
         let stmt = client.prepare(stmt);
-
         match stmt {
             Err(err) => {
                 Err(GeyserPluginError::Custom(Box::new(GeyserPluginPostgresError::DataSchemaError {
@@ -605,6 +852,17 @@ impl SimplePostgresClient {
                 &transaction_info.write_version,
                 &transaction_info.index,
                 &updated_on,
+                &transaction_info.token_account,
+                &transaction_info.token_owner,
+                &transaction_info.token_mint,
+                &transaction_info.transaction_type,
+                &transaction_info.pre_balance,
+                &transaction_info.post_balance,
+                &transaction_info.sol_amount,
+                &transaction_info.account_index,
+                &transaction_info.token_pre_amount,
+                &transaction_info.token_post_amount,
+                &transaction_info.token_delta,
             ],
         );
 
@@ -643,13 +901,18 @@ impl ParallelPostgresClient {
     ) -> Result<(), GeyserPluginError> {
         self.transaction_write_version
             .fetch_add(1, Ordering::Relaxed);
-        let wrk_item = DbWorkItem::LogTransaction(Box::new(Self::build_transaction_request(
+
+        let tx_request = Self::build_transaction_request(
             slot,
             transaction_info,
             self.transaction_write_version.load(Ordering::Relaxed),
-        )));
+        );
 
-        if let Err(err) = self.sender.send(wrk_item) {
+        let log_transaction_request = Box::new(tx_request);
+        let wrk_item = DbWorkItem::LogTransaction(log_transaction_request);
+        let result = self.sender.send(wrk_item);
+
+        if let Err(err) = result {
             return Err(GeyserPluginError::SlotStatusUpdateError {
                 msg: format!("Failed to update the transaction, error: {:?}", err),
             });
@@ -1019,6 +1282,7 @@ pub(crate) mod tests {
         TransactionStatusMeta {
             status: Ok(()),
             fee: 23456,
+            cost_units: None,
             pre_balances: vec![11, 22, 33],
             post_balances: vec![44, 55, 66],
             inner_instructions: Some(vec![InnerInstructions {
@@ -1460,5 +1724,219 @@ pub(crate) mod tests {
         let slot = 54;
         let db_transaction = build_db_transaction(slot, &transaction_info, 1);
         check_transaction(slot, &transaction_info, &db_transaction);
+    }
+
+    #[test]
+    fn test_signer_token_buy_detection_and_deltas() {
+        let fee_payer = Keypair::new();
+        let recipient = Keypair::new().pubkey();
+        let zero = Hash::default();
+        let tx = system_transaction::transfer(&fee_payer, &recipient, 1, zero);
+        let vtx = VersionedTransaction::from(tx);
+
+        let message_hash = Hash::new_unique();
+        let stx = SanitizedTransaction::try_create(
+            vtx,
+            message_hash,
+            Some(true),
+            SimpleAddressLoader::Disabled,
+            &HashSet::new(),
+        )
+        .unwrap();
+
+        let signer_owner = fee_payer.pubkey().to_string();
+        let token_acct_index: i16 = 1;
+        let token_mint = Pubkey::new_unique().to_string();
+
+        let meta = TransactionStatusMeta {
+            status: Ok(()),
+            fee: 5000,
+            cost_units: None,
+            pre_balances: vec![1_000_000],
+            post_balances: vec![900_000],
+            inner_instructions: None,
+            log_messages: None,
+            pre_token_balances: None,
+            post_token_balances: Some(vec![TransactionTokenBalance {
+                account_index: token_acct_index as u8,
+                mint: token_mint.clone(),
+                ui_token_amount: UiTokenAmount {
+                    ui_amount: Some(1000.0),
+                    decimals: 0,
+                    amount: "1000".to_string(),
+                    ui_amount_string: "1000".to_string(),
+                },
+                owner: signer_owner.clone(),
+                program_id: "program_id".to_string(),
+            }]),
+            rewards: None,
+            loaded_addresses: LoadedAddresses {
+                writable: vec![],
+                readonly: vec![],
+            },
+            return_data: None,
+            compute_units_consumed: None,
+        };
+
+        let sig = Signature::from([9u8; 64]);
+        let info = ReplicaTransactionInfoV2 {
+            signature: &sig,
+            is_vote: false,
+            transaction: &stx,
+            transaction_status_meta: &meta,
+            index: 0,
+        };
+
+        let db = build_db_transaction(1, &info, 1);
+
+        assert!(matches!(db.transaction_type, Some(TransactionType::Buy)));
+        assert_eq!(db.account_index, Some(token_acct_index));
+        assert_eq!(db.token_owner.as_deref(), Some(signer_owner.as_str()));
+        assert_eq!(db.token_mint.as_deref(), Some(token_mint.as_str()));
+        assert_eq!(db.token_pre_amount, None);
+        assert_eq!(db.token_post_amount, Some(1000));
+        assert_eq!(db.token_delta, Some(1000));
+        assert!(db.token_account.is_some());
+    }
+
+    #[test]
+    fn test_signer_token_sell_detection_and_deltas() {
+        let fee_payer = Keypair::new();
+        let recipient = Keypair::new().pubkey();
+        let zero = Hash::default();
+        let tx = system_transaction::transfer(&fee_payer, &recipient, 1, zero);
+        let vtx = VersionedTransaction::from(tx);
+
+        let message_hash = Hash::new_unique();
+        let stx = SanitizedTransaction::try_create(
+            vtx,
+            message_hash,
+            Some(true),
+            SimpleAddressLoader::Disabled,
+            &HashSet::new(),
+        )
+        .unwrap();
+
+        let signer_owner = fee_payer.pubkey().to_string();
+        let token_acct_index: i16 = 1;
+        let token_mint = Pubkey::new_unique().to_string();
+
+        let meta = TransactionStatusMeta {
+            status: Ok(()),
+            fee: 5000,
+            cost_units: None,
+            pre_balances: vec![900_000],
+            post_balances: vec![1_000_000],
+            inner_instructions: None,
+            log_messages: None,
+            pre_token_balances: Some(vec![TransactionTokenBalance {
+                account_index: token_acct_index as u8,
+                mint: token_mint.clone(),
+                ui_token_amount: UiTokenAmount {
+                    ui_amount: Some(1000.0),
+                    decimals: 0,
+                    amount: "1000".to_string(),
+                    ui_amount_string: "1000".to_string(),
+                },
+                owner: signer_owner.clone(),
+                program_id: "program_id".to_string(),
+            }]),
+            post_token_balances: Some(vec![TransactionTokenBalance {
+                account_index: token_acct_index as u8,
+                mint: token_mint.clone(),
+                ui_token_amount: UiTokenAmount {
+                    ui_amount: Some(750.0),
+                    decimals: 0,
+                    amount: "750".to_string(),
+                    ui_amount_string: "750".to_string(),
+                },
+                owner: signer_owner.clone(),
+                program_id: "program_id".to_string(),
+            }]),
+            rewards: None,
+            loaded_addresses: LoadedAddresses {
+                writable: vec![],
+                readonly: vec![],
+            },
+            return_data: None,
+            compute_units_consumed: None,
+        };
+
+        let sig = Signature::from([7u8; 64]);
+        let info = ReplicaTransactionInfoV2 {
+            signature: &sig,
+            is_vote: false,
+            transaction: &stx,
+            transaction_status_meta: &meta,
+            index: 0,
+        };
+
+        let db = build_db_transaction(1, &info, 1);
+
+        assert!(matches!(db.transaction_type, Some(TransactionType::Sell)));
+        assert_eq!(db.account_index, Some(token_acct_index));
+        assert_eq!(db.token_owner.as_deref(), Some(signer_owner.as_str()));
+        assert_eq!(db.token_mint.as_deref(), Some(token_mint.as_str()));
+        assert_eq!(db.token_pre_amount, Some(1000));
+        assert_eq!(db.token_post_amount, Some(750));
+        assert_eq!(db.token_delta, Some(-250));
+        assert!(db.token_account.is_some());
+    }
+
+    #[test]
+    fn test_mint_classification_from_logs_when_no_signer_token_row() {
+        let fee_payer = Keypair::new();
+        let recipient = Keypair::new().pubkey();
+        let zero = Hash::default();
+        let tx = system_transaction::transfer(&fee_payer, &recipient, 1, zero);
+        let vtx = VersionedTransaction::from(tx);
+
+        let message_hash = Hash::new_unique();
+        let stx = SanitizedTransaction::try_create(
+            vtx,
+            message_hash,
+            Some(true),
+            SimpleAddressLoader::Disabled,
+            &HashSet::new(),
+        )
+        .unwrap();
+
+        let meta = TransactionStatusMeta {
+            status: Ok(()),
+            fee: 5000,
+            cost_units: None,
+            pre_balances: vec![1_000_000],
+            post_balances: vec![1_000_000],
+            inner_instructions: None,
+            log_messages: Some(vec![
+                "Program Tokenkeg...".to_string(),
+                "Program log: Instruction: MintTo".to_string(),
+            ]),
+            pre_token_balances: None,
+            post_token_balances: None,
+            rewards: None,
+            loaded_addresses: LoadedAddresses {
+                writable: vec![],
+                readonly: vec![],
+            },
+            return_data: None,
+            compute_units_consumed: None,
+        };
+
+        let sig = Signature::from([3u8; 64]);
+        let info = ReplicaTransactionInfoV2 {
+            signature: &sig,
+            is_vote: false,
+            transaction: &stx,
+            transaction_status_meta: &meta,
+            index: 0,
+        };
+
+        let db = build_db_transaction(1, &info, 1);
+
+        assert!(matches!(db.transaction_type, Some(TransactionType::Mint)));
+        assert_eq!(db.token_delta, None);
+        assert_eq!(db.token_pre_amount, None);
+        assert_eq!(db.token_post_amount, None);
     }
 }

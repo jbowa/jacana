@@ -14,6 +14,7 @@ DROP TABLE spl_token_mint_index;
 
 DROP TYPE "TransactionError" CASCADE;
 DROP TYPE "TransactionErrorCode" CASCADE;
+DROP TYPE "TransactionType" CASCADE;
 DROP TYPE "LoadedMessageV0" CASCADE;
 DROP TYPE "LoadedAddresses" CASCADE;
 DROP TYPE "TransactionMessageV0" CASCADE;
