@@ -1,17 +1,54 @@
 {
-  "libpath": "./target/release/libagave_geyser_plugin_postgres.dylib",
-  "user": "admin",
-  "host": "localhost",
-  "password": "abcd1234",
-  "port": 5432,
-  "dbname": "main",
-  "threads": 1,
-  "batch_size": 20,
-  "panic_on_db_errors": false,
-  "accounts_selector" : {
-    "accounts" : ["*"]
+  "libpath": "./target/release/libjacana.dylib",
+  "starting_slot": 0,
+  "log_level": "info",
+  "connection": {
+    "host": "127.0.0.1",
+    "port": 9000,
+    "database": "geyser",
+    "username": "default",
+    "password": "P@ssword",
+    "compression": "lz4",
+    "validate_schemas": true,
+    "pool": {
+      "test_on_check_out": false,
+      "max_size": 25,
+      "min_idle": 5,
+      "connection_timeout_ms": 30000,
+      "idle_timeout_ms": 600000,
+      "max_lifetime_ms": 1800000,
+      "acquire_timeout_ms": 15000
+    },
+    "tls": {
+      "secure": false,
+      "domain": "jacana.example.com",
+      "cafile": "/etc/ssl/certs/ca.pem"
+    }
   },
-  "transaction_selector": {
-    "mentions": ["*"]
+  "channels": {
+    "buffer_size": 25000
+  },
+  "arrow": {
+    "batch_size": 16384,
+    "memory_limit_mb": 512
+  },
+  "filters": {
+    "transactions": {
+      "mentions": [
+        "54PDWjHKVktw7D3AqAZ5xSrrrqX1t3QHWUjV6QAEGiSq",
+        "corn4Demrh4Zzv6YzvKD2VnkhnRtUgto2YMydjSeug8"
+      ]
+    },
+    "accounts": {
+      "accounts": ["*"],
+      "owners": ["*"]
+    }
+  },
+  "batch": {
+    "accounts": { "max_rows": 60000, "max_bytes": 33554432, "flush_ms": 1500, "workers": 2 },
+    "transactions": { "max_rows": 60000, "max_bytes": 33554432, "flush_ms": 1500, "workers": 4 },
+    "slots": { "max_rows": 2000, "max_bytes": 1048576, "flush_ms": 500, "workers": 1 },
+    "blocks": { "max_rows": 1000, "max_bytes": 2097152, "flush_ms": 500, "workers": 1 },
+    "tokens": { "max_rows": 4000, "max_bytes": 4194304, "flush_ms": 2000, "workers": 1 }
   }
 }

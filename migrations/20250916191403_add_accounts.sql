@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS geyser.block
     rewards_pubkey Array(FixedString(32)),
     rewards_lamports Array(Int64),
     rewards_post_balance Array(UInt64),
-    rewards_reward_type Array(Enum8('Fee' = 1, 'Rent' = 2, 'Staking' = 3, 'Voting' = 4)),
+    rewards_reward_type Array(Enum8('Fee' = 1, 'Rent' = 2, 'Staking' = 3, 'Voting' = 4, 'Unknown' = 0)),
     rewards_commission Array(Nullable(UInt16))
 )
 ENGINE = ReplacingMergeTree(updated_at)
