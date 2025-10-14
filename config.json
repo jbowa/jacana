@@ -25,8 +25,11 @@
       "cafile": "/etc/ssl/certs/ca.pem"
     }
   },
-  "channels": {
-    "buffer_size": 25000
+  "channel_max_buffer": {
+    "slots": 10000,
+    "blocks": 10000,
+    "transactions": 50000,
+    "accounts": 100000
   },
   "arrow": {
     "batch_size": 16384,
@@ -40,15 +43,14 @@
       ]
     },
     "accounts": {
-      "accounts": ["*"],
-      "owners": ["*"]
+      "addresses": ["*"],
+      "programs": ["*"]
     }
   },
   "batch": {
     "accounts": { "max_rows": 60000, "max_bytes": 33554432, "flush_ms": 1500, "workers": 2 },
     "transactions": { "max_rows": 60000, "max_bytes": 33554432, "flush_ms": 1500, "workers": 4 },
     "slots": { "max_rows": 2000, "max_bytes": 1048576, "flush_ms": 500, "workers": 1 },
-    "blocks": { "max_rows": 1000, "max_bytes": 2097152, "flush_ms": 500, "workers": 1 },
-    "tokens": { "max_rows": 4000, "max_bytes": 4194304, "flush_ms": 2000, "workers": 1 }
+    "blocks": { "max_rows": 1000, "max_bytes": 2097152, "flush_ms": 500, "workers": 1 }
   }
 }

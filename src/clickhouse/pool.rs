@@ -29,13 +29,13 @@ type TableSchema = &'static [(&'static str, &'static str)];
 const ACCOUNT_SCHEMA: TableSchema = &[
     ("pubkey", "FixedString(32)"),
     ("owner", "FixedString(32)"),
-    ("lamports", "UInt64"),
     ("slot", "UInt64"),
+    ("lamports", "UInt64"),
     ("executable", "Bool"),
     ("rent_epoch", "UInt64"),
     ("data", "String"),
+    ("write_version", "UInt64"),
     ("updated_at", "DateTime64(3)"),
-    ("txn_signature", "Nullable(FixedString(64))"),
 ];
 
 const SLOT_SCHEMA: TableSchema = &[
@@ -51,17 +51,18 @@ const SLOT_SCHEMA: TableSchema = &[
 const BLOCK_SCHEMA: TableSchema = &[
     ("slot", "UInt64"),
     ("blockhash", "String"),
-    ("block_time", "Nullable(UInt64)"),
+    ("block_time", "Nullable(DateTime64(3))"),
     ("block_height", "Nullable(UInt64)"),
-    ("updated_at", "DateTime64(3)"),
+    ("parent_slot", "UInt64"),
     ("rewards_pubkey", "Array(FixedString(32))"),
     ("rewards_lamports", "Array(Int64)"),
-    ("rewards_post_balance", "Array(UInt64)"),
+    ("rewards_post_balance", "Array(Int64)"),
     (
         "rewards_reward_type",
-        "Array(Enum8('Fee' = 1, 'Rent' = 2, 'Staking' = 3, 'Voting' = 4, 'Unknown' = 0))",
+        "Array(Nullable(Enum8('Unknown' = 0, 'Fee' = 1, 'Rent' = 2, 'Staking' = 3, 'Voting' = 4)))",
     ),
-    ("rewards_commission", "Array(Nullable(UInt16))"),
+    ("rewards_commission", "Array(Nullable(Int16))"),
+    ("updated_at", "DateTime64(3)"),
 ];
 
 const TOKEN_SCHEMA: TableSchema = &[
@@ -672,7 +673,7 @@ impl<'a> StrCol<'a> {
 mod tests {
     use {
         super::*,
-        crate::config::{CompressionMethod, ConnectionCfg, PoolCfg, TimeoutCfg, TlsCfg},
+        crate::config::{CompressionMethod, ConnectionCfg, PoolCfg, TlsCfg},
     };
 
     fn cfg_base() -> ConnectionCfg {
@@ -684,7 +685,6 @@ mod tests {
             username: "user".into(),
             password: "pass".into(),
             compression: CompressionMethod::Lz4,
-            timeouts: TimeoutCfg::default(),
             pool: PoolCfg::default(),
             tls: TlsCfg::default(),
         }

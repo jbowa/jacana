@@ -17,9 +17,9 @@ pub struct TransactionsFilterCfg {
 #[serde(deny_unknown_fields)]
 pub struct AccountsFilterCfg {
     #[serde(default)]
-    pub accounts: Vec<String>,
+    pub addresses: Vec<String>,
     #[serde(default)]
-    pub owners: Vec<String>,
+    pub programs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -42,14 +42,20 @@ pub struct BatchPolicy {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ChannelCfg {
-    pub buffer_size: usize,
+pub struct ChannelMaxBufferCfg {
+    pub slots: usize,
+    pub blocks: usize,
+    pub transactions: usize,
+    pub accounts: usize,
 }
 
-impl Default for ChannelCfg {
+impl Default for ChannelMaxBufferCfg {
     fn default() -> Self {
         Self {
-            buffer_size: 25_000,
+            slots: 10_000,
+            blocks: 10_000,
+            transactions: 50_000,
+            accounts: 100_000,
         }
     }
 }
@@ -77,7 +83,6 @@ pub struct BatchCfg {
     pub transactions: BatchPolicy,
     pub slots: BatchPolicy,
     pub blocks: BatchPolicy,
-    pub tokens: BatchPolicy,
 }
 
 impl Default for BatchPolicy {
@@ -185,9 +190,10 @@ pub struct Config {
     #[serde(default)]
     pub connection: ConnectionCfg,
     #[serde(default)]
-    pub channels: ChannelCfg,
+    pub channel_max_buffer: ChannelMaxBufferCfg,
     #[serde(default)]
     pub log_level: String,
+    #[serde(default)]
     pub arrow: ArrowCfg,
     pub filters: FiltersCfg,
     pub libpath: String,
@@ -262,8 +268,7 @@ mod tests {
                 "accounts":      { "max_rows": 10000, "max_bytes": 10485760, "flush_ms": 2000, "workers": 1 },
                 "transactions":  { "max_rows": 10000, "max_bytes": 10485760, "flush_ms": 2000, "workers": 1 },
                 "slots":         { "max_rows": 500,   "max_bytes": 1048576,  "flush_ms": 500,  "workers": 1 },
-                "blocks":        { "max_rows": 500,   "max_bytes": 1048576,  "flush_ms": 500,  "workers": 1 },
-                "tokens":        { "max_rows": 1000,  "max_bytes": 2097152,  "flush_ms": 1500, "workers": 1 }
+                "blocks":        { "max_rows": 500,   "max_bytes": 1048576,  "flush_ms": 500,  "workers": 1 }
             }
         }
         "#;
@@ -272,13 +277,15 @@ mod tests {
         assert_eq!(cfg.libpath, "/path/to/lib");
         assert_eq!(cfg.starting_slot, 12345);
         assert!(cfg.filters.transactions.mentions.is_empty());
-        assert!(cfg.filters.accounts.accounts.is_empty());
-        assert!(cfg.filters.accounts.owners.is_empty());
+        assert!(cfg.filters.accounts.addresses.is_empty());
+        assert!(cfg.filters.accounts.programs.is_empty());
         assert_eq!(cfg.batch.accounts.max_rows, 10_000);
         assert_eq!(cfg.batch.transactions.flush_ms, 2000);
-        assert_eq!(cfg.batch.tokens.workers, 1);
         assert_eq!(cfg.connection.port, 9000);
-        assert_eq!(cfg.channels.buffer_size, 25_000);
+        assert_eq!(cfg.channel_max_buffer.slots, 10_000);
+        assert_eq!(cfg.channel_max_buffer.blocks, 10_000);
+        assert_eq!(cfg.channel_max_buffer.transactions, 50_000);
+        assert_eq!(cfg.channel_max_buffer.accounts, 100_000);
         assert_eq!(cfg.arrow.batch_size, 16_384);
         assert_eq!(cfg.arrow.memory_limit_mb, 512);
     }
@@ -294,17 +301,14 @@ mod tests {
                 "username": "indexer",
                 "password": "secret123",
                 "compression": "zstd",
-                "timeouts": {
-                    "connection_ms": 30000,
-                    "read_ms": 300000,
-                    "write_ms": 120000
-                },
                 "pool": {
                     "max_size": 25,
                     "min_idle": 8,
                     "connection_timeout_ms": 45000,
                     "idle_timeout_ms": 600000,
-                    "test_on_check_out": true
+                    "test_on_check_out": true,
+                    "max_lifetime_ms": 1800000,
+                    "acquire_timeout_ms": 15000
                 },
                 "tls": {
                     "secure": true,
@@ -312,11 +316,17 @@ mod tests {
                     "cafile": "/etc/ssl/certs/ca.pem"
                 }
             },
+            "channel_max_buffer": {
+                "slots": 5000,
+                "blocks": 5000,
+                "transactions": 75000,
+                "accounts": 150000
+            },
             "filters": {
                 "transactions": { "mentions": ["*"] },
                 "accounts": {
-                    "accounts": ["11111111111111111111111111111112"],
-                    "owners":   ["11111111111111111111111111111113"]
+                    "addresses": ["11111111111111111111111111111112"],
+                    "programs":  ["11111111111111111111111111111113"]
                 }
             },
             "libpath": "/custom/lib/path",
@@ -325,8 +335,7 @@ mod tests {
                 "accounts":      { "max_rows": 60000, "max_bytes": 67108864, "flush_ms": 2000, "workers": 2 },
                 "transactions":  { "max_rows": 60000, "max_bytes": 67108864, "flush_ms": 2000, "workers": 4 },
                 "slots":         { "max_rows": 1000,  "max_bytes": 1048576,  "flush_ms": 300,  "workers": 1 },
-                "blocks":        { "max_rows": 1000,  "max_bytes": 1048576,  "flush_ms": 300,  "workers": 1 },
-                "tokens":        { "max_rows": 5000,  "max_bytes": 4194304,  "flush_ms": 1500, "workers": 1 }
+                "blocks":        { "max_rows": 1000,  "max_bytes": 1048576,  "flush_ms": 300,  "workers": 1 }
             }
         }
         "#;
@@ -348,6 +357,10 @@ mod tests {
             Some("/etc/ssl/certs/ca.pem")
         );
         assert_eq!(cfg.batch.transactions.workers, 4);
+        assert_eq!(cfg.channel_max_buffer.slots, 5000);
+        assert_eq!(cfg.channel_max_buffer.blocks, 5000);
+        assert_eq!(cfg.channel_max_buffer.transactions, 75000);
+        assert_eq!(cfg.channel_max_buffer.accounts, 150000);
     }
 
     #[test]
@@ -361,8 +374,7 @@ mod tests {
                 "accounts":      { "max_rows": 10000, "max_bytes": 10485760, "flush_ms": 2000, "workers": 1 },
                 "transactions":  { "max_rows": 10000, "max_bytes": 10485760, "flush_ms": 2000, "workers": 1 },
                 "slots":         { "max_rows": 500,   "max_bytes": 1048576,  "flush_ms": 500,  "workers": 1 },
-                "blocks":        { "max_rows": 500,   "max_bytes": 1048576,  "flush_ms": 500,  "workers": 1 },
-                "tokens":        { "max_rows": 1000,  "max_bytes": 2097152,  "flush_ms": 1500, "workers": 1 }
+                "blocks":        { "max_rows": 500,   "max_bytes": 1048576,  "flush_ms": 500,  "workers": 1 }
             }
         }
         "#;
@@ -430,8 +442,7 @@ mod tests {
                 "accounts":      { "max_rows": 10000, "max_bytes": 10485760, "flush_ms": 2000, "workers": 1 },
                 "transactions":  { "max_rows": 10000, "max_bytes": 10485760, "flush_ms": 2000, "workers": 1 },
                 "slots":         { "max_rows": 500,   "max_bytes": 1048576,  "flush_ms": 500,  "workers": 1 },
-                "blocks":        { "max_rows": 500,   "max_bytes": 1048576,  "flush_ms": 500,  "workers": 1 },
-                "tokens":        { "max_rows": 1000,  "max_bytes": 2097152,  "flush_ms": 1500, "workers": 1 }
+                "blocks":        { "max_rows": 500,   "max_bytes": 1048576,  "flush_ms": 500,  "workers": 1 }
             }
         }
         "#;
@@ -446,7 +457,7 @@ mod tests {
         {
             "filters": {
                 "transactions": { "mentions": [] },
-                "accounts": { "accounts": [], "owners": [] }
+                "accounts": { "addresses": [], "programs": [] }
             },
             "libpath": "/lib",
             "starting_slot": 1000,
@@ -454,15 +465,37 @@ mod tests {
                 "accounts":      { "max_rows": 10000, "max_bytes": 10485760, "flush_ms": 2000, "workers": 1 },
                 "transactions":  { "max_rows": 10000, "max_bytes": 10485760, "flush_ms": 2000, "workers": 1 },
                 "slots":         { "max_rows": 500,   "max_bytes": 1048576,  "flush_ms": 500,  "workers": 1 },
-                "blocks":        { "max_rows": 500,   "max_bytes": 1048576,  "flush_ms": 500,  "workers": 1 },
-                "tokens":        { "max_rows": 1000,  "max_bytes": 2097152,  "flush_ms": 1500, "workers": 1 }
+                "blocks":        { "max_rows": 500,   "max_bytes": 1048576,  "flush_ms": 500,  "workers": 1 }
             }
         }
         "#;
 
         let cfg = Config::load_from_str(json).unwrap();
         assert!(cfg.filters.transactions.mentions.is_empty());
-        assert!(cfg.filters.accounts.accounts.is_empty());
-        assert!(cfg.filters.accounts.owners.is_empty());
+        assert!(cfg.filters.accounts.addresses.is_empty());
+        assert!(cfg.filters.accounts.programs.is_empty());
+    }
+
+    #[test]
+    fn test_channel_max_buffer_defaults() {
+        let json = r#"
+        {
+            "filters": { "transactions": {}, "accounts": {} },
+            "libpath": "/lib",
+            "starting_slot": 1000,
+            "batch": {
+                "accounts":      { "max_rows": 10000, "max_bytes": 10485760, "flush_ms": 2000, "workers": 1 },
+                "transactions":  { "max_rows": 10000, "max_bytes": 10485760, "flush_ms": 2000, "workers": 1 },
+                "slots":         { "max_rows": 500,   "max_bytes": 1048576,  "flush_ms": 500,  "workers": 1 },
+                "blocks":        { "max_rows": 500,   "max_bytes": 1048576,  "flush_ms": 500,  "workers": 1 }
+            }
+        }
+        "#;
+
+        let cfg = Config::load_from_str(json).unwrap();
+        assert_eq!(cfg.channel_max_buffer.slots, 10_000);
+        assert_eq!(cfg.channel_max_buffer.blocks, 10_000);
+        assert_eq!(cfg.channel_max_buffer.transactions, 50_000);
+        assert_eq!(cfg.channel_max_buffer.accounts, 100_000);
     }
 }

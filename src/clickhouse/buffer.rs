@@ -150,25 +150,25 @@ where
         }
     }
 
-    pub fn push(&mut self, item: T) -> bool {
+    pub fn push(&mut self, item: T) -> Result<(), T> {
         let item_size = item.memory_size();
 
         if self.items.len() >= self.max_items || self.memory_bytes + item_size > self.max_memory {
-            return false;
+            return Err(item);
         }
 
         self.update_size_estimate(item_size);
         self.memory_bytes += item_size;
         self.items.push(item);
 
-        true
+        Ok(())
     }
 
     /// Forces an oversized item into an empty buffer for emergency processing.
     pub fn push_oversized(&mut self, item: T) -> Result<(), ClickHouseError> {
         if !self.items.is_empty() {
             return Err(ClickHouseError::BufferOverflow(
-                "Cannot add oversized item to non-empty buffer".into(),
+                "cannot add oversized item to non-empty buffer".into(),
             ));
         }
 
@@ -176,7 +176,7 @@ where
 
         if item_size > self.max_memory {
             warn!(
-                "Oversized item: {} bytes exceeds buffer limit of {} bytes",
+                "oversized item: {} bytes exceeds buffer limit of {} bytes",
                 item_size, self.max_memory
             );
             self.metrics.record_oversized_item();
@@ -348,11 +348,10 @@ mod tests {
             size: 100,
         };
 
-        assert!(buffer.push(item.clone()));
-        assert!(buffer.push(item.clone()));
-        assert!(buffer.push(item.clone()));
-
-        assert!(!buffer.push(item));
+        assert!(buffer.push(item.clone()).is_ok());
+        assert!(buffer.push(item.clone()).is_ok());
+        assert!(buffer.push(item.clone()).is_ok());
+        assert!(buffer.push(item).is_err());
 
         assert_eq!(buffer.len(), 3);
         assert_eq!(buffer.memory_usage(), 300);
@@ -369,9 +368,9 @@ mod tests {
             size: 100,
         };
 
-        assert!(buffer.push(item.clone()));
-        assert!(buffer.push(item.clone()));
-        assert!(!buffer.push(item));
+        assert!(buffer.push(item.clone()).is_ok());
+        assert!(buffer.push(item.clone()).is_ok());
+        assert!(buffer.push(item).is_err());
 
         assert_eq!(buffer.len(), 2);
         assert_eq!(buffer.memory_usage(), 200);
@@ -392,7 +391,7 @@ mod tests {
         assert!(!should_flush);
 
         for _ in 0..5 {
-            buffer.push(item.clone());
+            assert!(buffer.push(item.clone()).is_ok());
         }
 
         let (should_flush, reason) = buffer.should_flush();
@@ -411,7 +410,7 @@ mod tests {
             size: 100,
         };
 
-        buffer.push(item);
+        assert!(buffer.push(item).is_ok());
         std::thread::sleep(Duration::from_millis(60));
 
         let (should_flush, reason) = buffer.should_flush();
@@ -430,7 +429,7 @@ mod tests {
             size: 600,
         };
 
-        assert!(!buffer.push(oversized_item.clone()));
+        assert!(buffer.push(oversized_item.clone()).is_err());
         assert!(buffer.push_oversized(oversized_item).is_ok());
         assert_eq!(buffer.len(), 1);
         assert_eq!(buffer.memory_usage(), 600);
@@ -452,7 +451,7 @@ mod tests {
             size: 600,
         };
 
-        buffer.push(normal_item);
+        assert!(buffer.push(normal_item).is_ok());
         assert!(buffer.push_oversized(oversized_item).is_err());
     }
 
@@ -468,7 +467,7 @@ mod tests {
         };
 
         for _ in 0..5 {
-            buffer.push(item.clone());
+            assert!(buffer.push(item.clone()).is_ok());
         }
 
         let (item_util, memory_util) = buffer.utilization_percent();
@@ -489,8 +488,8 @@ mod tests {
             size: 200,
         };
 
-        buffer.push(item);
-        assert_eq!(buffer.estimated_item_size(), 936);
+        assert!(buffer.push(item).is_ok());
+        assert_eq!(buffer.estimated_item_size(), 941);
     }
 
     #[test]
@@ -545,7 +544,7 @@ mod tests {
             size: 100,
         };
 
-        buffer.push(item);
+        assert!(buffer.push(item).is_ok());
         assert_eq!(buffer.len(), 1);
         assert_eq!(buffer.memory_usage(), 100);
 
