@@ -37,10 +37,8 @@
   },
   "filters": {
     "transactions": {
-      "mentions": [
-        "54PDWjHKVktw7D3AqAZ5xSrrrqX1t3QHWUjV6QAEGiSq",
-        "corn4Demrh4Zzv6YzvKD2VnkhnRtUgto2YMydjSeug8"
-      ]
+      "mentions": ["*"],
+      "exclude_votes": true
     },
     "accounts": {
       "addresses": ["*"],

@@ -118,7 +118,6 @@ where
     max_items: usize,
     max_memory: usize,
     flush_interval: Duration,
-    target_batch_size: usize,
     last_flush: Instant,
     estimated_item_size: usize,
     metrics: BatchMetrics,
@@ -136,14 +135,12 @@ where
         arrow_cfg: &ArrowCfg,
     ) -> Self {
         let target_batch_size = arrow_cfg.batch_size.min(max_items);
-
         Self {
             items: Vec::with_capacity(target_batch_size),
             memory_bytes: 0,
             max_items,
             max_memory,
             flush_interval,
-            target_batch_size,
             last_flush: Instant::now(),
             estimated_item_size: 1024,
             metrics: BatchMetrics::default(),
