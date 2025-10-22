@@ -7,7 +7,7 @@ use {
 #[derive(Debug, Clone)]
 enum TransactionsFilterMode {
     Disabled,
-    All,
+    All { exclude_votes: bool },
     AllVotes,
     Mentions(HashSet<Pubkey>),
 }
@@ -28,7 +28,9 @@ impl TransactionsFilter {
         // Check for wildcard "*" - matches all transactions.
         if cfg.mentions.iter().any(|s| s == "*") {
             return Ok(Self {
-                mode: TransactionsFilterMode::All,
+                mode: TransactionsFilterMode::All {
+                    exclude_votes: cfg.exclude_votes,
+                },
             });
         }
 
@@ -96,7 +98,12 @@ impl TransactionsFilter {
     pub fn matches<'a>(&self, is_vote: bool, keys: impl Iterator<Item = &'a Pubkey>) -> bool {
         match &self.mode {
             TransactionsFilterMode::Disabled => false,
-            TransactionsFilterMode::All => true,
+            TransactionsFilterMode::All { exclude_votes } => {
+                if *exclude_votes && is_vote {
+                    return false;
+                }
+                true
+            }
             TransactionsFilterMode::AllVotes => is_vote,
             TransactionsFilterMode::Mentions(set) => keys.into_iter().any(|k| set.contains(k)),
         }
@@ -119,6 +126,14 @@ mod tests {
     fn make_cfg(mentions: Vec<&str>) -> TransactionsFilterCfg {
         TransactionsFilterCfg {
             mentions: mentions.into_iter().map(String::from).collect(),
+            exclude_votes: false,
+        }
+    }
+
+    fn make_cfg_ex(mentions: Vec<&str>, exclude_votes: bool) -> TransactionsFilterCfg {
+        TransactionsFilterCfg {
+            mentions: mentions.into_iter().map(String::from).collect(),
+            exclude_votes,
         }
     }
 
@@ -138,7 +153,37 @@ mod tests {
         assert!(filter.is_enabled());
         assert!(filter.matches(false, [&new_pubkey(1)].into_iter()));
         assert!(filter.matches(true, [&new_pubkey(2)].into_iter()));
-        assert!(matches!(filter.mode, TransactionsFilterMode::All));
+        matches!(filter.mode, TransactionsFilterMode::All { .. });
+        if let TransactionsFilterMode::All { exclude_votes } = filter.mode {
+            assert!(!exclude_votes);
+        }
+    }
+
+    #[test]
+    fn test_all_mode_exclude_votes_true() {
+        let cfg = make_cfg_ex(vec!["*"], true);
+        let filter = TransactionsFilter::from_cfg(&cfg).unwrap();
+        assert!(filter.is_enabled());
+        assert!(filter.matches(false, [].into_iter()));
+        assert!(!filter.matches(true, [].into_iter()));
+        if let TransactionsFilterMode::All { exclude_votes } = filter.mode {
+            assert!(exclude_votes);
+        } else {
+            panic!("expected All mode");
+        }
+    }
+
+    #[test]
+    fn test_all_mode_exclude_votes_false() {
+        let cfg = make_cfg_ex(vec!["*"], false);
+        let filter = TransactionsFilter::from_cfg(&cfg).unwrap();
+        assert!(filter.matches(false, [].into_iter()));
+        assert!(filter.matches(true, [].into_iter()));
+        if let TransactionsFilterMode::All { exclude_votes } = filter.mode {
+            assert!(!exclude_votes);
+        } else {
+            panic!("expected All mode");
+        }
     }
 
     #[test]
@@ -198,6 +243,7 @@ mod tests {
     fn test_invalid_base58_pubkey() {
         let cfg = TransactionsFilterCfg {
             mentions: vec!["!".repeat(44)],
+            exclude_votes: false,
         };
         let result = TransactionsFilter::from_cfg(&cfg);
         assert!(matches!(
@@ -210,6 +256,7 @@ mod tests {
     fn test_invalid_pubkey_length() {
         let cfg = TransactionsFilterCfg {
             mentions: vec!["shortkey".to_string()],
+            exclude_votes: false,
         };
         let result = TransactionsFilter::from_cfg(&cfg);
         assert!(matches!(
@@ -224,7 +271,7 @@ mod tests {
         let cfg = make_cfg(vec!["*", &bs58::encode(pk).into_string()]);
         let filter = TransactionsFilter::from_cfg(&cfg).unwrap();
         // Wildcard takes precedence.
-        assert!(matches!(filter.mode, TransactionsFilterMode::All));
+        matches!(filter.mode, TransactionsFilterMode::All { .. });
     }
 
     #[test]

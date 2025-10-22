@@ -11,6 +11,8 @@ use {
 pub struct TransactionsFilterCfg {
     #[serde(default)]
     pub mentions: Vec<String>,
+    #[serde(default)]
+    pub exclude_votes: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

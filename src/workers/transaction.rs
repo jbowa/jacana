@@ -26,13 +26,27 @@ use {
     std::{
         mem,
         sync::{
-            atomic::{AtomicBool, AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
             Arc,
         },
         time::{Duration, Instant},
     },
-    tokio::{task::JoinHandle, time::timeout},
+    tokio::{
+        select,
+        task::JoinHandle,
+        time::{sleep, timeout},
+    },
 };
+
+#[derive(Debug, Clone)]
+pub struct BalanceChange {
+    pub signature: [u8; 64],
+    pub account: [u8; 32],
+    pub account_index: u8,
+    pub pre_balance: u64,
+    pub post_balance: u64,
+    pub updated_at: DateTime<Utc>,
+}
 
 #[derive(Debug, Clone)]
 pub struct Transaction {
@@ -47,25 +61,58 @@ pub struct Transaction {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone)]
-pub struct BalanceChange {
-    pub signature: [u8; 64],
-    pub account: [u8; 32],
-    pub account_index: u8,
-    pub pre_balance: u64,
-    pub post_balance: u64,
-    pub updated_at: DateTime<Utc>,
-}
-
 impl BatchConvertible for Transaction {
     fn to_record_batch(items: &[Self]) -> Result<RecordBatch, ClickHouseError> {
         if items.is_empty() {
-            return Err(ClickHouseError::BufferOverflow(
-                "cannot create RecordBatch from empty items".into(),
-            ));
+            return RecordBatch::try_new(
+                Self::schema(),
+                vec![
+                    Arc::new(BinaryBuilder::new().finish()),
+                    Arc::new(UInt64Builder::new().finish()),
+                    Arc::new(UInt64Builder::new().finish()),
+                    Arc::new(BooleanBuilder::new().finish()),
+                    Arc::new(UInt8Builder::new().finish()),
+                    Arc::new(BooleanBuilder::new().finish()),
+                    Arc::new(UInt64Builder::new().finish()),
+                    Arc::new(TimestampMillisecondBuilder::new().finish()),
+                    Arc::new(
+                        ListBuilder::new(BinaryBuilder::new())
+                            .with_field(Arc::new(Field::new("item", DataType::Binary, false)))
+                            .finish(),
+                    ),
+                    Arc::new(
+                        ListBuilder::new(UInt8Builder::new())
+                            .with_field(Arc::new(Field::new("item", DataType::UInt8, false)))
+                            .finish(),
+                    ),
+                    Arc::new(
+                        ListBuilder::new(UInt64Builder::new())
+                            .with_field(Arc::new(Field::new("item", DataType::UInt64, false)))
+                            .finish(),
+                    ),
+                    Arc::new(
+                        ListBuilder::new(UInt64Builder::new())
+                            .with_field(Arc::new(Field::new("item", DataType::UInt64, false)))
+                            .finish(),
+                    ),
+                    Arc::new(
+                        ListBuilder::new(TimestampMillisecondBuilder::new())
+                            .with_field(Arc::new(Field::new(
+                                "item",
+                                DataType::Timestamp(TimeUnit::Millisecond, None),
+                                false,
+                            )))
+                            .finish(),
+                    ),
+                ],
+            )
+            .map_err(|e| {
+                ClickHouseError::Connection(format!("Empty RecordBatch creation failed: {e}"))
+            });
         }
 
         let len = items.len();
+
         let mut signature_builder = BinaryBuilder::with_capacity(len, len * 64);
         let mut slot_builder = UInt64Builder::with_capacity(len);
         let mut tx_index_builder = UInt64Builder::with_capacity(len);
@@ -75,21 +122,20 @@ impl BatchConvertible for Transaction {
         let mut fee_builder = UInt64Builder::with_capacity(len);
         let mut updated_at_builder = TimestampMillisecondBuilder::with_capacity(len);
 
-        let total_balance_changes: usize = items.iter().map(|t| t.balance_changes.len()).sum();
-        let mut balance_signatures_builder = ListBuilder::new(BinaryBuilder::with_capacity(
-            total_balance_changes,
-            total_balance_changes * 64,
-        ));
-        let mut balance_accounts_builder = ListBuilder::new(BinaryBuilder::with_capacity(
-            total_balance_changes,
-            total_balance_changes * 32,
-        ));
-        let mut balance_account_indices_builder =
-            ListBuilder::new(UInt8Builder::with_capacity(total_balance_changes));
-        let mut balance_pre_balances_builder =
-            ListBuilder::new(UInt64Builder::with_capacity(total_balance_changes));
-        let mut balance_post_balances_builder =
-            ListBuilder::new(UInt64Builder::with_capacity(total_balance_changes));
+        let mut balance_changes_account_builder = ListBuilder::new(BinaryBuilder::new())
+            .with_field(Arc::new(Field::new("item", DataType::Binary, false)));
+        let mut balance_changes_account_index_builder = ListBuilder::new(UInt8Builder::new())
+            .with_field(Arc::new(Field::new("item", DataType::UInt8, false)));
+        let mut balance_changes_pre_balance_builder = ListBuilder::new(UInt64Builder::new())
+            .with_field(Arc::new(Field::new("item", DataType::UInt64, false)));
+        let mut balance_changes_post_balance_builder = ListBuilder::new(UInt64Builder::new())
+            .with_field(Arc::new(Field::new("item", DataType::UInt64, false)));
+        let mut balance_changes_updated_at_builder =
+            ListBuilder::new(TimestampMillisecondBuilder::new()).with_field(Arc::new(Field::new(
+                "item",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            )));
 
         for item in items {
             signature_builder.append_value(&item.signature);
@@ -101,41 +147,32 @@ impl BatchConvertible for Transaction {
             fee_builder.append_value(item.fee);
             updated_at_builder.append_value(item.updated_at.timestamp_millis());
 
-            // Process balance changes for this transaction.
-            let balance_sig_values = balance_signatures_builder.values();
             for bc in &item.balance_changes {
-                balance_sig_values.append_value(&bc.signature);
+                balance_changes_account_builder
+                    .values()
+                    .append_value(&bc.account);
+                balance_changes_account_index_builder
+                    .values()
+                    .append_value(bc.account_index);
+                balance_changes_pre_balance_builder
+                    .values()
+                    .append_value(bc.pre_balance);
+                balance_changes_post_balance_builder
+                    .values()
+                    .append_value(bc.post_balance);
+                balance_changes_updated_at_builder
+                    .values()
+                    .append_value(bc.updated_at.timestamp_millis());
             }
-            balance_signatures_builder.append(true);
-
-            let balance_acc_values = balance_accounts_builder.values();
-            for bc in &item.balance_changes {
-                balance_acc_values.append_value(&bc.account);
-            }
-            balance_accounts_builder.append(true);
-
-            let balance_idx_values = balance_account_indices_builder.values();
-            for bc in &item.balance_changes {
-                balance_idx_values.append_value(bc.account_index);
-            }
-            balance_account_indices_builder.append(true);
-
-            let balance_pre_values = balance_pre_balances_builder.values();
-            for bc in &item.balance_changes {
-                balance_pre_values.append_value(bc.pre_balance);
-            }
-            balance_pre_balances_builder.append(true);
-
-            let balance_post_values = balance_post_balances_builder.values();
-            for bc in &item.balance_changes {
-                balance_post_values.append_value(bc.post_balance);
-            }
-            balance_post_balances_builder.append(true);
+            balance_changes_account_builder.append(true);
+            balance_changes_account_index_builder.append(true);
+            balance_changes_pre_balance_builder.append(true);
+            balance_changes_post_balance_builder.append(true);
+            balance_changes_updated_at_builder.append(true);
         }
 
-        let schema = Self::schema();
         RecordBatch::try_new(
-            schema,
+            Self::schema(),
             vec![
                 Arc::new(signature_builder.finish()),
                 Arc::new(slot_builder.finish()),
@@ -145,71 +182,71 @@ impl BatchConvertible for Transaction {
                 Arc::new(success_builder.finish()),
                 Arc::new(fee_builder.finish()),
                 Arc::new(updated_at_builder.finish()),
-                Arc::new(balance_signatures_builder.finish()),
-                Arc::new(balance_accounts_builder.finish()),
-                Arc::new(balance_account_indices_builder.finish()),
-                Arc::new(balance_pre_balances_builder.finish()),
-                Arc::new(balance_post_balances_builder.finish()),
+                Arc::new(balance_changes_account_builder.finish()),
+                Arc::new(balance_changes_account_index_builder.finish()),
+                Arc::new(balance_changes_pre_balance_builder.finish()),
+                Arc::new(balance_changes_post_balance_builder.finish()),
+                Arc::new(balance_changes_updated_at_builder.finish()),
             ],
         )
-        .map_err(|e| ClickHouseError::Connection(format!("arrow RecordBatch creation failed: {e}")))
+        .map_err(|e| ClickHouseError::Connection(format!("RecordBatch creation failed: {e}")))
     }
 
+    #[inline]
     fn memory_size(&self) -> usize {
-        mem::size_of::<[u8; 64]>()
-            + mem::size_of::<u64>() * 3
-            + mem::size_of::<bool>() * 2
-            + mem::size_of::<u8>()
-            + mem::size_of::<DateTime<Utc>>()
-            + mem::size_of::<Vec<BalanceChange>>()
-            + self.balance_changes.len()
-                * (mem::size_of::<[u8; 64]>()
-                    + mem::size_of::<[u8; 32]>()
-                    + mem::size_of::<u8>()
-                    + mem::size_of::<u64>() * 2
-                    + mem::size_of::<DateTime<Utc>>())
+        mem::size_of::<Self>() + (self.balance_changes.len() * mem::size_of::<BalanceChange>())
+            - mem::size_of::<Vec<BalanceChange>>()
     }
 
     fn schema() -> SchemaRef {
-        Arc::new(Schema::new(vec![
-            Field::new("signature", DataType::Binary, false),
-            Field::new("slot", DataType::UInt64, false),
-            Field::new("tx_index", DataType::UInt64, false),
-            Field::new("is_vote", DataType::Boolean, false),
-            Field::new("message_type", DataType::UInt8, false),
-            Field::new("success", DataType::Boolean, false),
-            Field::new("fee", DataType::UInt64, false),
-            Field::new(
-                "updated_at",
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                false,
-            ),
-            Field::new(
-                "balance_signatures",
-                DataType::List(Arc::new(Field::new("item", DataType::Binary, false))),
-                false,
-            ),
-            Field::new(
-                "balance_accounts",
-                DataType::List(Arc::new(Field::new("item", DataType::Binary, false))),
-                false,
-            ),
-            Field::new(
-                "balance_account_indices",
-                DataType::List(Arc::new(Field::new("item", DataType::UInt8, false))),
-                false,
-            ),
-            Field::new(
-                "balance_pre_balances",
-                DataType::List(Arc::new(Field::new("item", DataType::UInt64, false))),
-                false,
-            ),
-            Field::new(
-                "balance_post_balances",
-                DataType::List(Arc::new(Field::new("item", DataType::UInt64, false))),
-                false,
-            ),
-        ]))
+        static SCHEMA: std::sync::OnceLock<SchemaRef> = std::sync::OnceLock::new();
+        SCHEMA
+            .get_or_init(|| {
+                Arc::new(Schema::new(vec![
+                    Field::new("signature", DataType::Binary, false),
+                    Field::new("slot", DataType::UInt64, false),
+                    Field::new("tx_index", DataType::UInt64, false),
+                    Field::new("is_vote", DataType::Boolean, false),
+                    Field::new("message_type", DataType::UInt8, false),
+                    Field::new("success", DataType::Boolean, false),
+                    Field::new("fee", DataType::UInt64, false),
+                    Field::new(
+                        "updated_at",
+                        DataType::Timestamp(TimeUnit::Millisecond, None),
+                        false,
+                    ),
+                    Field::new(
+                        "balance_changes.account",
+                        DataType::List(Arc::new(Field::new("item", DataType::Binary, false))),
+                        false,
+                    ),
+                    Field::new(
+                        "balance_changes.account_index",
+                        DataType::List(Arc::new(Field::new("item", DataType::UInt8, false))),
+                        false,
+                    ),
+                    Field::new(
+                        "balance_changes.pre_balance",
+                        DataType::List(Arc::new(Field::new("item", DataType::UInt64, false))),
+                        false,
+                    ),
+                    Field::new(
+                        "balance_changes.post_balance",
+                        DataType::List(Arc::new(Field::new("item", DataType::UInt64, false))),
+                        false,
+                    ),
+                    Field::new(
+                        "balance_changes.updated_at",
+                        DataType::List(Arc::new(Field::new(
+                            "item",
+                            DataType::Timestamp(TimeUnit::Millisecond, None),
+                            false,
+                        ))),
+                        false,
+                    ),
+                ]))
+            })
+            .clone()
     }
 }
 
@@ -219,6 +256,7 @@ pub struct TransactionWorker {
     buffer: BatchBuffer<Transaction>,
     metrics: Metrics,
     last_health_check: Instant,
+    total_balance_changes: Arc<AtomicU64>,
 }
 
 impl TransactionWorker {
@@ -242,30 +280,27 @@ impl TransactionWorker {
             buffer,
             metrics: Metrics::new(id),
             last_health_check: Instant::now(),
+            total_balance_changes: Arc::new(AtomicU64::new(0)),
         })
     }
 
+    #[inline]
     async fn process_transaction(
         &mut self,
         transaction: Transaction,
     ) -> Result<(), ClickHouseError> {
         self.metrics.total_processed.fetch_add(1, Ordering::Relaxed);
+        self.total_balance_changes
+            .fetch_add(transaction.balance_changes.len() as u64, Ordering::Relaxed);
 
         if let Err(transaction) = self.buffer.push(transaction) {
             self.metrics
                 .memory_pressure_events
                 .fetch_add(1, Ordering::Relaxed);
-
-            if let Err(e) = self.flush().await {
-                self.metrics.record_error();
-                return Err(e);
-            }
+            self.flush().await?;
 
             if let Err(transaction) = self.buffer.push(transaction) {
-                self.buffer.push_oversized(transaction).map_err(|e| {
-                    self.metrics.record_error();
-                    e
-                })?;
+                self.buffer.push_oversized(transaction)?;
             }
         }
 
@@ -281,33 +316,31 @@ impl TransactionWorker {
     }
 
     async fn flush(&mut self) -> Result<(), ClickHouseError> {
-        let flush_start = Instant::now();
-        let batch_result = self.buffer.flush_to_arrow();
-        let record_batch = match batch_result {
-            Ok(Some(batch)) => batch,
-            Ok(None) => return Ok(()),
-            Err(e) => {
-                self.metrics.record_error();
-                return Err(e);
-            }
-        };
-        let rows = record_batch.num_rows();
-        if rows == 0 {
+        if self.buffer.is_empty() {
             return Ok(());
         }
-        let conn = match timeout(CONNECTION_ACQUIRE_TIMEOUT, self.pool.get_connection()).await {
-            Ok(Ok(conn)) => conn,
-            Ok(Err(e)) => {
-                self.metrics.record_error();
-                return Err(e);
-            }
-            Err(_) => {
+
+        let flush_start = Instant::now();
+        let record_batch = self
+            .buffer
+            .flush_to_arrow()?
+            .ok_or_else(|| ClickHouseError::BufferOverflow("flush returned empty batch".into()))?;
+
+        let transaction_rows = record_batch.num_rows();
+        if transaction_rows == 0 {
+            return Ok(());
+        }
+
+        let conn = timeout(CONNECTION_ACQUIRE_TIMEOUT, self.pool.get_connection())
+            .await
+            .map_err(|_| {
                 self.metrics.record_connection_timeout();
-                return Err(ClickHouseError::Timeout(
-                    "connection acquire timeout in flush".into(),
-                ));
-            }
-        };
+                ClickHouseError::Timeout("connection acquire timeout".into())
+            })?
+            .map_err(|e| {
+                self.metrics.record_error();
+                e
+            })?;
 
         let insert_query = format!("INSERT INTO {} FORMAT ArrowStream", TBL_TRANSACTION);
         let mut insert_stream = conn
@@ -315,7 +348,7 @@ impl TransactionWorker {
             .await
             .map_err(|e| {
                 self.metrics.record_error();
-                ClickHouseError::Connection(format!("failed to create insert stream: {e}"))
+                ClickHouseError::Connection(format!("insert stream creation failed: {e}"))
             })?;
 
         while let Some(result) = insert_stream.next().await {
@@ -328,7 +361,7 @@ impl TransactionWorker {
         let flush_duration = flush_start.elapsed();
         self.metrics
             .total_flushed
-            .fetch_add(rows as u64, Ordering::Relaxed);
+            .fetch_add(transaction_rows as u64, Ordering::Relaxed);
         self.metrics.flush_count.fetch_add(1, Ordering::Relaxed);
         self.metrics
             .last_flush_duration
@@ -336,14 +369,17 @@ impl TransactionWorker {
         self.metrics.reset_error_count();
 
         log::debug!(
-            "transaction worker {} flushed {} transaction records via Arrow in {:?}",
+            "transaction worker {} flushed {} transactions ({} balance changes) in {:?}",
             self.id,
-            rows,
+            transaction_rows,
+            self.total_balance_changes.swap(0, Ordering::Relaxed),
             flush_duration
         );
+
         Ok(())
     }
 
+    #[inline]
     async fn health_check(&mut self) -> Result<(), ClickHouseError> {
         if self.last_health_check.elapsed() < HEALTH_CHECK_INTERVAL {
             return Ok(());
@@ -371,10 +407,11 @@ impl TransactionWorker {
         let mut flush_ticker = tokio::time::interval(FLUSH_TICK_INTERVAL);
         let mut stats_ticker = tokio::time::interval(STATS_INTERVAL);
         let mut health_ticker = tokio::time::interval(HEALTH_CHECK_INTERVAL);
+
         log::info!("transaction worker {} started", self.id);
 
         loop {
-            tokio::select! {
+            select! {
                 transaction_result = receiver.as_async().recv() => {
                     match transaction_result {
                         Ok(transaction) => {
@@ -382,8 +419,8 @@ impl TransactionWorker {
                                 let consecutive_errors = self.metrics.consecutive_error_count();
                                 if consecutive_errors > MAX_CONSECUTIVE_ERRORS {
                                     log::error!(
-                                        "transaction worker {} has {} consecutive errors, shutting down: {}",
-                                        self.id, consecutive_errors, e
+                                        "transaction worker {} exceeded error threshold ({} consecutive), shutting down: {e}",
+                                        self.id, consecutive_errors
                                     );
                                     return Err(e);
                                 }
@@ -391,11 +428,12 @@ impl TransactionWorker {
                             }
                         },
                         Err(_) => {
-                            log::debug!("transaction worker {} Kanal channel closed", self.id);
+                            log::debug!("transaction worker {} channel closed", self.id);
                             break;
                         }
                     }
                 },
+
                 _ = flush_ticker.tick() => {
                     let (should_flush, reason) = self.buffer.should_flush();
                     if should_flush {
@@ -403,28 +441,32 @@ impl TransactionWorker {
                             let consecutive_errors = self.metrics.consecutive_error_count();
                             if consecutive_errors > MAX_FLUSH_ERRORS {
                                 log::error!(
-                                    "transaction worker {} has {} errors. Exceeded threshold, shutting down: {}",
+                                    "transaction worker {} exceeded flush error threshold ({}), shutting down: {}",
                                     self.id, consecutive_errors, e
                                 );
                                 return Err(e);
                             }
-                            log::warn!("transaction worker {} flush error: {} (reason: {:?})", self.id, e, reason);
+                            log::warn!("transaction worker {} flush error (reason: {:?}): {}", self.id, reason, e);
                         }
                     }
                 },
+
                 _ = stats_ticker.tick() => {
                     self.metrics.log_stats();
                 },
+
                 _ = health_ticker.tick() => {
                     if let Err(e) = self.health_check().await {
                         log::debug!("transaction worker {} health check failed (non-fatal): {}", self.id, e);
                     }
                 },
             }
+
             if exit_flag.load(Ordering::Relaxed) {
                 log::info!("transaction worker {} received exit signal", self.id);
                 break;
             }
+
             if !is_startup_done && startup_done_flag.load(Ordering::Relaxed) {
                 if let Err(e) = self.flush().await {
                     log::warn!("transaction worker {} startup flush failed: {}", self.id, e);
@@ -434,6 +476,7 @@ impl TransactionWorker {
                 log::info!("transaction worker {} startup complete", self.id);
             }
         }
+
         self.flush().await?;
         log::info!("transaction worker {} shutdown", self.id);
         Ok(())
@@ -512,28 +555,25 @@ impl TransactionManager {
 
         let router_exit_flag = exit_flag.clone();
         let router_handle = tokio::spawn(async move {
-            let mut round_robin = 0;
+            let mut round_robin = 0usize;
             while let Ok(transaction) = main_receiver.as_async().recv().await {
                 if router_exit_flag.load(Ordering::Relaxed) {
                     break;
                 }
                 let target_worker = round_robin % worker_senders.len();
-                match worker_senders[target_worker]
+                if worker_senders[target_worker]
                     .as_async()
                     .send(transaction)
                     .await
+                    .is_err()
                 {
-                    Ok(_) => {
-                        round_robin = round_robin.wrapping_add(1);
-                    }
-                    Err(_) => {
-                        log::error!(
-                            "failed to route transaction to worker {} - channel closed",
-                            target_worker
-                        );
-                        break;
-                    }
+                    log::error!(
+                        "failed to route transaction to worker {} - channel closed",
+                        target_worker
+                    );
+                    break;
                 }
+                round_robin = round_robin.wrapping_add(1);
             }
             drop(worker_senders);
             log::debug!("transaction router task completed");
@@ -543,19 +583,21 @@ impl TransactionManager {
 
         let start_time = Instant::now();
         startup_done_flag.store(true, Ordering::Relaxed);
+
         while startup_done_count.load(Ordering::Relaxed) < worker_count
             && start_time.elapsed() < STARTUP_TIMEOUT
         {
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            sleep(Duration::from_millis(50)).await;
         }
 
         let completed_workers = startup_done_count.load(Ordering::Relaxed);
         if completed_workers < worker_count {
             return Err(ClickHouseError::Timeout(format!(
-                "timeout waiting for workers to start: {}/{} completed",
+                "startup timeout: {}/{} workers completed",
                 completed_workers, worker_count
             )));
         }
+
         log::info!(
             "TransactionManager initialization complete with {} workers",
             worker_count
@@ -571,6 +613,7 @@ impl TransactionManager {
         })
     }
 
+    #[inline]
     pub fn try_send_transaction(&self, transaction: Transaction) -> Result<(), ClickHouseError> {
         match self.sender.try_send(transaction) {
             Ok(true) => Ok(()),
@@ -590,6 +633,7 @@ impl TransactionManager {
         );
         self.exit_flag.store(true, Ordering::Relaxed);
         drop(self.sender);
+
         let mut shutdown_errors = Vec::new();
         for (i, handle) in self.workers.into_iter().enumerate() {
             match timeout(WORKER_SHUTDOWN_TIMEOUT, handle).await {
@@ -601,12 +645,12 @@ impl TransactionManager {
                     shutdown_errors.push(e);
                 }
                 Ok(Err(e)) => {
-                    error!("worker {} panicked: {}", i, e);
+                    log::error!("worker {} panicked: {}", i, e);
                     shutdown_errors
                         .push(ClickHouseError::Connection(format!("worker panic: {}", e)));
                 }
                 Err(_) => {
-                    error!("worker {} shutdown timeout", i);
+                    log::error!("worker {} shutdown timeout", i);
                     shutdown_errors.push(ClickHouseError::Timeout(format!(
                         "worker {} shutdown timeout",
                         i
@@ -614,12 +658,13 @@ impl TransactionManager {
                 }
             }
         }
+
         if shutdown_errors.is_empty() {
-            info!("TransactionManager shutdown complete");
+            log::info!("TransactionManager shutdown complete");
             Ok(())
         } else {
             let error_msg = format!("shutdown completed with {} errors", shutdown_errors.len());
-            error!("{}", error_msg);
+            log::error!("{}", error_msg);
             Err(ClickHouseError::Connection(error_msg))
         }
     }

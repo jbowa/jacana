@@ -2,34 +2,34 @@
 default:
     just --list
 
-# Migrate up
-up:
+# Apply all pending migrations
+migrate-up:
     #!/usr/bin/env bash
     set -euo pipefail
     export GOOSE_DRIVER=clickhouse
-    export GOOSE_DBSTRING="tcp://default:P@ssword@localhost:9000/default"
+    export GOOSE_DBSTRING="tcp://default:password@localhost:9000/default"
     goose -dir migrations up
 
-# Migrate down
-down:
+# Rollback the last migration
+migrate-down:
     #!/usr/bin/env bash
     set -euo pipefail
     export GOOSE_DRIVER=clickhouse
-    export GOOSE_DBSTRING="tcp://default:P@ssword@localhost:9000/default"
+    export GOOSE_DBSTRING="tcp://default:password@localhost:9000/default"
     goose -dir migrations down
 
 # Show migration status
-status:
+migrate-status:
     #!/usr/bin/env bash
     set -euo pipefail
     export GOOSE_DRIVER=clickhouse
-    export GOOSE_DBSTRING="tcp://default:P@ssword@localhost:9000/default"
+    export GOOSE_DBSTRING="tcp://default:password@localhost:9000/default"
     goose -dir migrations status
 
-# Create new migration
-create NAME:
+# Create new migration file
+migrate-create NAME:
     #!/usr/bin/env bash
     set -euo pipefail
     export GOOSE_DRIVER=clickhouse
-    export GOOSE_DBSTRING="tcp://default:P@ssword@localhost:9000/default"
+    export GOOSE_DBSTRING="tcp://default:password@localhost:9000/default"
     goose -dir migrations create {{NAME}} sql

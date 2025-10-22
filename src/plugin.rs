@@ -214,39 +214,70 @@ impl GeyserPlugin for Plugin {
             }
         };
 
-        let transaction_data = match transaction {
-            ReplicaTransactionInfoVersions::V0_0_2(tx_info) => self.process_transaction_info(
-                &tx_info.signature,
-                tx_info.index,
-                tx_info.is_vote,
-                &tx_info.transaction,
-                &tx_info.transaction_status_meta,
-                slot,
-                filter,
-            )?,
-            ReplicaTransactionInfoVersions::V0_0_3(tx_info) => self.process_transaction_info(
-                &tx_info.signature,
-                tx_info.index,
-                tx_info.is_vote,
-                &tx_info.transaction,
-                &tx_info.transaction_status_meta,
-                slot,
-                filter,
-            )?,
+        let tx_data = match transaction {
+            ReplicaTransactionInfoVersions::V0_0_3(tx_info) => {
+                if !filter.matches(
+                    tx_info.is_vote,
+                    tx_info.transaction.message.static_account_keys().iter(),
+                ) {
+                    return Ok(());
+                }
+
+                let message_type = match &tx_info.transaction.message {
+                    VersionedMessage::Legacy(_) => 0u8,
+                    VersionedMessage::V0(_) => 1u8,
+                };
+                let static_account_keys = tx_info.transaction.message.static_account_keys();
+                let signature = *tx_info.signature.as_array();
+                let now = chrono::Utc::now();
+                let pre_balances = &tx_info.transaction_status_meta.pre_balances;
+                let post_balances = &tx_info.transaction_status_meta.post_balances;
+                let fee = tx_info.transaction_status_meta.fee;
+                let balance_changes: Vec<BalanceChange> = pre_balances
+                    .iter()
+                    .zip(post_balances.iter())
+                    .enumerate()
+                    .filter_map(|(index, (&pre, &post))| {
+                        if pre == post {
+                            return None;
+                        }
+
+                        let account = static_account_keys.get(index)?;
+                        let account_bytes: [u8; 32] = account.as_ref().try_into().ok()?;
+
+                        Some(BalanceChange {
+                            signature,
+                            account: account_bytes,
+                            account_index: index as u8,
+                            pre_balance: pre,
+                            post_balance: post,
+                            updated_at: now,
+                        })
+                    })
+                    .collect();
+
+                Transaction {
+                    signature,
+                    slot,
+                    tx_index: tx_info.index as usize,
+                    is_vote: tx_info.is_vote,
+                    message_type,
+                    success: tx_info.transaction_status_meta.status.is_ok(),
+                    fee,
+                    balance_changes,
+                    updated_at: now,
+                }
+            }
             _ => {
-                log::warn!(
-                    "unsupported transaction info version. only V0_0_2 and V0_0_3 are supported"
-                );
+                log::warn!("unsupported transaction info version. only V0_0_3 is supported");
                 return Ok(());
             }
         };
 
-        match client.try_send_transaction(transaction_data) {
+        match client.try_send_transaction(tx_data) {
             Ok(()) => Ok(()),
             Err(ClickHouseError::BufferOverflow(_)) => {
-                if slot % 10000 == 0 {
-                    log::warn!("transaction channel at capacity at slot {}", slot);
-                }
+                log::warn!("transaction channel at capacity at slot {}", slot);
                 Ok(())
             }
             Err(ClickHouseError::ChannelClosed(_)) => {
@@ -368,67 +399,6 @@ impl GeyserPlugin for Plugin {
             .as_ref()
             .map_or_else(|| false, |filter| filter.is_enabled())
     }
-}
-
-fn process_transaction_info(
-    &self,
-    signature: &solana_pubkey::Signature,
-    tx_index: u64,
-    is_vote: bool,
-    transaction: &solana_transaction::sanitized::SanitizedTransaction,
-    transaction_status_meta: &solana_transaction_status::TransactionStatusMeta,
-    slot: u64,
-    filter: &TransactionsFilter,
-) -> Option<Transaction> {
-    let account_keys = transaction.message().static_account_keys().iter();
-    if !filter.matches(is_vote, account_keys) {
-        return None;
-    }
-
-    let signature = *signature.as_array();
-    let message_type = match transaction.message() {
-        VersionedMessage::Legacy(_) => 0u8,
-        VersionedMessage::V0(_) => 1u8,
-    };
-    let now = chrono::Utc::now();
-    let static_account_keys = transaction.message().static_account_keys();
-    let pre_balances = &transaction_status_meta.pre_balances;
-    let post_balances = &transaction_status_meta.post_balances;
-
-    let balance_changes: Vec<BalanceChange> = pre_balances
-        .iter()
-        .zip(post_balances.iter())
-        .enumerate()
-        .filter_map(|(index, (&pre, &post))| {
-            if pre == post {
-                return None;
-            }
-
-            let account = static_account_keys.get(index)?;
-            let account_bytes: [u8; 32] = account.as_ref().try_into().ok()?;
-
-            Some(BalanceChange {
-                signature,
-                account: account_bytes,
-                account_index: index as u8,
-                pre_balance: pre,
-                post_balance: post,
-                updated_at: now,
-            })
-        })
-        .collect();
-
-    Some(Transaction {
-        signature,
-        slot,
-        tx_index,
-        is_vote,
-        message_type,
-        success: transaction_status_meta.status.is_ok(),
-        fee: transaction_status_meta.fee,
-        balance_changes,
-        updated_at: now,
-    })
 }
 
 #[no_mangle]
