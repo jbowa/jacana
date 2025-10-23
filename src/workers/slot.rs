@@ -9,8 +9,7 @@ use {
         metrics::Metrics,
         workers::consts::{
             CONNECTION_ACQUIRE_TIMEOUT, FLUSH_TICK_INTERVAL, HEALTH_CHECK_INTERVAL,
-            MAX_CONSECUTIVE_ERRORS, MAX_FLUSH_ERRORS, STARTUP_TIMEOUT, STATS_INTERVAL,
-            WORKER_SHUTDOWN_TIMEOUT,
+            MAX_CONSECUTIVE_ERRORS, MAX_FLUSH_ERRORS, STATS_INTERVAL, WORKER_SHUTDOWN_TIMEOUT,
         },
     },
     chrono::{DateTime, Utc},
@@ -22,7 +21,7 @@ use {
         tracing::debug,
     },
     futures_util::StreamExt,
-    kanal::{bounded, Receiver, Sender},
+    kanal::{Receiver, Sender},
     log::{error, info, warn},
     std::{
         sync::{
@@ -31,11 +30,7 @@ use {
         },
         time::{Duration, Instant},
     },
-    tokio::{
-        select,
-        task::JoinHandle,
-        time::{sleep, timeout},
-    },
+    tokio::{select, task::JoinHandle, time::timeout},
 };
 
 #[derive(Debug, Clone)]
@@ -248,7 +243,7 @@ impl SlotWorker {
         }
     }
 
-    pub async fn run(
+    async fn run_impl(
         &mut self,
         receiver: Receiver<Slot>,
         exit_flag: Arc<AtomicBool>,
@@ -327,6 +322,37 @@ impl SlotWorker {
     }
 }
 
+#[async_trait::async_trait]
+impl crate::workers::ManagedWorker for SlotWorker {
+    type Item = Slot;
+
+    fn entity_name() -> &'static str {
+        "Slot"
+    }
+
+    fn create(
+        id: usize,
+        pool: Arc<ConnectionPool>,
+        arrow_cfg: &ArrowCfg,
+        max_rows: u64,
+        max_bytes: u64,
+        flush_ms: u64,
+    ) -> Result<Self, ClickHouseError> {
+        SlotWorker::new(id, pool, arrow_cfg, max_rows, max_bytes, flush_ms)
+    }
+
+    async fn run(
+        mut self,
+        receiver: Receiver<Slot>,
+        exit_flag: Arc<AtomicBool>,
+        startup_done_flag: Arc<AtomicBool>,
+        startup_done_count: Arc<AtomicUsize>,
+    ) -> Result<(), ClickHouseError> {
+        self.run_impl(receiver, exit_flag, startup_done_flag, startup_done_count)
+            .await
+    }
+}
+
 pub struct SlotManager {
     pool: Arc<ConnectionPool>,
     sender: Sender<Slot>,
@@ -352,92 +378,21 @@ impl SlotManager {
         arrow_cfg: &ArrowCfg,
         channel_size: usize,
     ) -> Result<Self, ClickHouseError> {
-        let pool = ConnectionPool::new(&conn_config).await?;
-        let worker_count = batch_cfg.slots.workers.max(1) as usize;
-        info!("initializing SlotManager with {} workers", worker_count);
-        let (main_sender, main_receiver) = bounded::<Slot>(channel_size);
-        let exit_flag = Arc::new(AtomicBool::new(false));
-        let startup_done_flag = Arc::new(AtomicBool::new(false));
-        let startup_done_count = Arc::new(AtomicUsize::new(0));
-        let mut workers = Vec::with_capacity(worker_count + 1);
-        let mut worker_senders = Vec::with_capacity(worker_count);
-        for i in 0..worker_count {
-            let (worker_sender, worker_receiver) = bounded(batch_cfg.slots.max_rows as usize);
-            worker_senders.push(worker_sender);
-            let mut worker = SlotWorker::new(
-                i,
-                pool.clone(),
-                arrow_cfg,
-                batch_cfg.slots.max_rows,
-                batch_cfg.slots.max_bytes,
-                batch_cfg.slots.flush_ms,
-            )?;
-            let exit_flag_clone = exit_flag.clone();
-            let startup_done_flag_clone = startup_done_flag.clone();
-            let startup_done_count_clone = startup_done_count.clone();
-            let handle = tokio::spawn(async move {
-                worker
-                    .run(
-                        worker_receiver,
-                        exit_flag_clone,
-                        startup_done_flag_clone,
-                        startup_done_count_clone,
-                    )
-                    .await
-            });
-            workers.push(handle);
-        }
-        let router_exit_flag = exit_flag.clone();
-        let router_handle = tokio::spawn(async move {
-            let mut round_robin = 0;
-            while let Ok(slot) = main_receiver.as_async().recv().await {
-                if router_exit_flag.load(Ordering::Relaxed) {
-                    break;
-                }
-                let target_worker = round_robin % worker_senders.len();
-                match worker_senders[target_worker].as_async().send(slot).await {
-                    Ok(_) => {
-                        round_robin = round_robin.wrapping_add(1);
-                    }
-                    Err(_) => {
-                        error!(
-                            "failed to route slot to worker {} - channel closed",
-                            target_worker
-                        );
-                        break;
-                    }
-                }
-            }
-            drop(worker_senders);
-            debug!("slot router task completed");
-            Ok(())
-        });
-        workers.push(router_handle);
-        let start_time = Instant::now();
-        startup_done_flag.store(true, Ordering::Relaxed);
-        while startup_done_count.load(Ordering::Relaxed) < worker_count
-            && start_time.elapsed() < STARTUP_TIMEOUT
-        {
-            sleep(Duration::from_millis(100)).await;
-        }
-        let completed_workers = startup_done_count.load(Ordering::Relaxed);
-        if completed_workers < worker_count {
-            return Err(ClickHouseError::Timeout(format!(
-                "timeout waiting for workers to start: {}/{} completed",
-                completed_workers, worker_count
-            )));
-        }
-        info!(
-            "SlotManager initialization complete with {} workers",
-            worker_count
-        );
+        let components = crate::workers::build_manager::<SlotWorker>(
+            conn_config,
+            &batch_cfg.slots,
+            arrow_cfg,
+            channel_size,
+        )
+        .await?;
+
         Ok(Self {
-            pool,
-            sender: main_sender,
-            workers,
-            exit_flag,
-            worker_count,
-            channel_capacity: channel_size,
+            pool: components.pool,
+            sender: components.sender,
+            workers: components.workers,
+            exit_flag: components.exit_flag,
+            worker_count: components.worker_count,
+            channel_capacity: components.channel_capacity,
         })
     }
 

@@ -1,4 +1,4 @@
-# Jacana (WIP)
+# Jacana
 
 **A high-throughput Solana Geyser plugin for ClickHouse indexing using Apache Arrow columnar format over native TCP.**
 
