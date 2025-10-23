@@ -66,15 +66,11 @@ impl Metrics {
         let errors = self.errors.load(Ordering::Relaxed);
         let memory_pressure = self.memory_pressure_events.load(Ordering::Relaxed);
         let connection_timeouts = self.connection_timeouts.load(Ordering::Relaxed);
-        let avg_flush_duration = if flush_count > 0 {
-            self.last_flush_duration.load(Ordering::Relaxed) / flush_count
-        } else {
-            0
-        };
+        let last_flush_us = self.last_flush_duration.load(Ordering::Relaxed);
 
         info!(
-          "{}-worker-{} stats: processed={}, flushed={}, flushes={}, errors={}, memory_pressure={}, connection_timeouts={}, avg_flush_us={}",
-          self.worker_type, self.worker_id, processed, flushed, flush_count, errors, memory_pressure, connection_timeouts, avg_flush_duration
+          "{}-worker-{} stats: processed={}, flushed={}, flushes={}, errors={}, memory_pressure={}, connection_timeouts={}, last_flush_us={}",
+          self.worker_type, self.worker_id, processed, flushed, flush_count, errors, memory_pressure, connection_timeouts, last_flush_us
       );
     }
 }

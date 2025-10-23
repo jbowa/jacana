@@ -17,7 +17,7 @@ use {
     clickhouse_arrow::arrow::arrow::{
         array::{
             BinaryBuilder, BooleanBuilder, ListBuilder, RecordBatch, TimestampMillisecondBuilder,
-            UInt64Builder, UInt8Builder,
+            UInt16Builder, UInt64Builder, UInt8Builder,
         },
         datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit},
     },
@@ -42,7 +42,7 @@ use {
 pub struct BalanceChange {
     pub signature: [u8; 64],
     pub account: [u8; 32],
-    pub account_index: u8,
+    pub account_index: u16,
     pub pre_balance: u64,
     pub post_balance: u64,
     pub updated_at: DateTime<Utc>,
@@ -81,8 +81,8 @@ impl BatchConvertible for Transaction {
                             .finish(),
                     ),
                     Arc::new(
-                        ListBuilder::new(UInt8Builder::new())
-                            .with_field(Arc::new(Field::new("item", DataType::UInt8, false)))
+                        ListBuilder::new(UInt16Builder::new())
+                            .with_field(Arc::new(Field::new("item", DataType::UInt16, false)))
                             .finish(),
                     ),
                     Arc::new(
@@ -124,8 +124,8 @@ impl BatchConvertible for Transaction {
 
         let mut balance_changes_account_builder = ListBuilder::new(BinaryBuilder::new())
             .with_field(Arc::new(Field::new("item", DataType::Binary, false)));
-        let mut balance_changes_account_index_builder = ListBuilder::new(UInt8Builder::new())
-            .with_field(Arc::new(Field::new("item", DataType::UInt8, false)));
+        let mut balance_changes_account_index_builder = ListBuilder::new(UInt16Builder::new())
+            .with_field(Arc::new(Field::new("item", DataType::UInt16, false)));
         let mut balance_changes_pre_balance_builder = ListBuilder::new(UInt64Builder::new())
             .with_field(Arc::new(Field::new("item", DataType::UInt64, false)));
         let mut balance_changes_post_balance_builder = ListBuilder::new(UInt64Builder::new())
@@ -222,7 +222,7 @@ impl BatchConvertible for Transaction {
                     ),
                     Field::new(
                         "balance_changes.account_index",
-                        DataType::List(Arc::new(Field::new("item", DataType::UInt8, false))),
+                        DataType::List(Arc::new(Field::new("item", DataType::UInt16, false))),
                         false,
                     ),
                     Field::new(
@@ -305,12 +305,16 @@ impl TransactionWorker {
         }
 
         let current_memory = self.buffer.memory_usage();
-        let max_memory = self.metrics.max_memory_used.load(Ordering::Relaxed);
-        if current_memory > max_memory {
-            self.metrics
-                .max_memory_used
-                .store(current_memory, Ordering::Relaxed);
-        }
+        self.metrics
+            .max_memory_used
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |max| {
+                if current_memory > max {
+                    Some(current_memory)
+                } else {
+                    None
+                }
+            })
+            .ok();
 
         Ok(())
     }

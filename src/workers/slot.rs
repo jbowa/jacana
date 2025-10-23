@@ -161,12 +161,16 @@ impl SlotWorker {
         }
 
         let current_memory = self.buffer.memory_usage();
-        let max_memory = self.metrics.max_memory_used.load(Ordering::Relaxed);
-        if current_memory > max_memory {
-            self.metrics
-                .max_memory_used
-                .store(current_memory, Ordering::Relaxed);
-        }
+        self.metrics
+            .max_memory_used
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |max| {
+                if current_memory > max {
+                    Some(current_memory)
+                } else {
+                    None
+                }
+            })
+            .ok();
         Ok(())
     }
 

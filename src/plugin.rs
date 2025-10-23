@@ -1,7 +1,7 @@
 use {
     crate::{
         clickhouse::{ClickHouseClient, ClickHouseError},
-        config::{BatchCfg, Config},
+        config::Config,
         filters::{accounts::AccountsFilter, transactions::TransactionsFilter},
         workers::{
             account::Account,
@@ -24,7 +24,6 @@ struct JacanaPlugin {
     client: Option<ClickHouseClient>,
     accounts_filter: Option<AccountsFilter>,
     transactions_filter: Option<TransactionsFilter>,
-    batch: Option<BatchCfg>,
     starting_slot: Option<u64>,
 }
 
@@ -51,11 +50,12 @@ impl GeyserPlugin for JacanaPlugin {
         self.accounts_filter = Some(AccountsFilter::from_cfg(&config.filters.accounts)?);
         self.transactions_filter =
             Some(TransactionsFilter::from_cfg(&config.filters.transactions)?);
-        self.batch = Some(config.batch.clone());
         self.starting_slot = Some(config.starting_slot);
 
+        // Ensure at least 1 runtime thread
+        let runtime_threads = config.runtime_threads.max(1);
         let runtime = Builder::new_multi_thread()
-            .worker_threads(config.runtime_threads)
+            .worker_threads(runtime_threads)
             .thread_name("jacana-worker")
             .enable_all()
             .build()
@@ -100,6 +100,11 @@ impl GeyserPlugin for JacanaPlugin {
         slot: u64,
         is_startup: bool,
     ) -> PluginResult<()> {
+        let filter = match &self.accounts_filter {
+            Some(f) => f,
+            None => return Ok(()),
+        };
+
         if is_startup {
             if let Some(starting_slot) = self.starting_slot {
                 if slot < starting_slot {
@@ -107,10 +112,6 @@ impl GeyserPlugin for JacanaPlugin {
                 }
             }
         }
-        let filter = match &self.accounts_filter {
-            Some(f) => f,
-            None => return Ok(()),
-        };
 
         let account_info = match account {
             ReplicaAccountInfoVersions::V0_0_3(info) => info,
@@ -238,6 +239,11 @@ impl GeyserPlugin for JacanaPlugin {
                         if pre == post {
                             return None;
                         }
+                        // Skip if index exceeds u16::MAX (extremely unlikely but possible)
+                        if index > u16::MAX as usize {
+                            log::warn!("Skipping balance change at index {} (exceeds u16::MAX) for transaction at slot {}", index, slot);
+                            return None;
+                        }
 
                         let account = static_account_keys.get(index)?;
                         let account_bytes: [u8; 32] = account.as_ref().try_into().ok()?;
@@ -245,7 +251,7 @@ impl GeyserPlugin for JacanaPlugin {
                         Some(BalanceChange {
                             signature,
                             account: account_bytes,
-                            account_index: index as u8,
+                            account_index: index as u16,
                             pre_balance: pre,
                             post_balance: post,
                             updated_at: now,
@@ -402,7 +408,7 @@ impl GeyserPlugin for JacanaPlugin {
 #[allow(improper_ctypes_definitions)]
 /// # Safety
 ///
-/// This function returns the GeyserPluginPostgres pointer as trait GeyserPlugin.
+/// This function returns the JacanaPlugin pointer as trait GeyserPlugin.
 pub unsafe extern "C" fn _create_plugin() -> *mut dyn GeyserPlugin {
     let plugin = JacanaPlugin::default();
     let plugin: Box<dyn GeyserPlugin> = Box::new(plugin);

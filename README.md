@@ -82,7 +82,6 @@ The ClickHouse native binary protocol (port 9000) has significantly less overhea
 - **Minimal framing**: No HTTP/2 multiplexing overhead, no RPC dispatch machinery
 - **Protocol-level compression**: LZ4/ZSTD at transport layer, ~70% bandwidth reduction
 - **Lower CPU cost**: Benchmarks show 4× throughput improvement vs gRPC with compression enabled for numeric-heavy workloads
-- **Trusted by ClickHouse internals**: Used for inter-server replication and internal communication
 
 **3. Intelligent Batching**
 
@@ -382,7 +381,7 @@ CREATE TABLE transaction (
     -- Nested balance changes (flattened as parallel arrays)
     balance_changes Nested (
         account FixedString(32),
-        account_index UInt8,
+        account_index UInt16,
         pre_balance UInt64,
         post_balance UInt64,
         updated_at DateTime64(3)

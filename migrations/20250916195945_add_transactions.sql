@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS geyser.transaction
     updated_at DateTime64(3) DEFAULT now64(3),
     balance_changes Nested(
         account FixedString(32),
-        account_index UInt8,
+        account_index UInt16,
         pre_balance UInt64,
         post_balance UInt64,
         updated_at DateTime64(3)

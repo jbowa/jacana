@@ -169,7 +169,10 @@ mod tests {
         if let TransactionsFilterMode::All { exclude_votes } = filter.mode {
             assert!(exclude_votes);
         } else {
-            panic!("expected All mode");
+            assert!(
+                matches!(filter.mode, TransactionsFilterMode::All { .. }),
+                "expected All mode"
+            );
         }
     }
 
@@ -182,7 +185,10 @@ mod tests {
         if let TransactionsFilterMode::All { exclude_votes } = filter.mode {
             assert!(!exclude_votes);
         } else {
-            panic!("expected All mode");
+            assert!(
+                matches!(filter.mode, TransactionsFilterMode::All { .. }),
+                "expected All mode"
+            );
         }
     }
 

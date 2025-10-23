@@ -95,7 +95,7 @@ const TRANSACTION_SCHEMA: TableSchema = &[
     ("fee", "UInt64"),
     ("updated_at", "DateTime64(3)"),
     ("balance_changes.account", "Array(FixedString(32))"),
-    ("balance_changes.account_index", "Array(UInt8)"),
+    ("balance_changes.account_index", "Array(UInt16)"),
     ("balance_changes.pre_balance", "Array(UInt64)"),
     ("balance_changes.post_balance", "Array(UInt64)"),
     ("balance_changes.updated_at", "Array(DateTime64(3))"),
@@ -555,11 +555,11 @@ impl ConnectionPool {
         let mut items: Vec<(String, String)> = body
             .split(',')
             .filter(|x| !x.trim().is_empty())
-            .map(|kv| {
+            .filter_map(|kv| {
                 let mut parts = kv.split('=');
-                let k = parts.next().unwrap().trim().to_string();
-                let v = parts.next().unwrap().trim().to_string();
-                (k, v)
+                let k = parts.next()?.trim().to_string();
+                let v = parts.next()?.trim().to_string();
+                Some((k, v))
             })
             .collect();
 
