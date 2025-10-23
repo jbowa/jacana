@@ -161,7 +161,7 @@ impl AccountWorker {
             id,
             pool,
             buffer,
-            metrics: Metrics::new(id),
+            metrics: Metrics::new(id, "account"),
             last_health_check: Instant::now(),
         })
     }

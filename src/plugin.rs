@@ -19,7 +19,7 @@ use {
 };
 
 #[derive(Default)]
-struct Plugin {
+struct JacanaPlugin {
     runtime: Option<tokio::runtime::Runtime>,
     client: Option<ClickHouseClient>,
     accounts_filter: Option<AccountsFilter>,
@@ -28,13 +28,13 @@ struct Plugin {
     starting_slot: Option<u64>,
 }
 
-impl std::fmt::Debug for Plugin {
+impl std::fmt::Debug for JacanaPlugin {
     fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         Ok(())
     }
 }
 
-impl GeyserPlugin for Plugin {
+impl GeyserPlugin for JacanaPlugin {
     fn name(&self) -> &'static str {
         concat!(env!("CARGO_PKG_NAME"), "-", env!("CARGO_PKG_VERSION"))
     }
@@ -54,10 +54,9 @@ impl GeyserPlugin for Plugin {
         self.batch = Some(config.batch.clone());
         self.starting_slot = Some(config.starting_slot);
 
-        // TODO: let worker_threads = config.runtime_threads.unwrap_or(2);
         let runtime = Builder::new_multi_thread()
-            .worker_threads(4)
-            .thread_name("clickhouse-coordinator")
+            .worker_threads(config.runtime_threads)
+            .thread_name("jacana-worker")
             .enable_all()
             .build()
             .map_err(|e| GeyserPluginError::Custom(Box::new(e)))?;
@@ -90,7 +89,6 @@ impl GeyserPlugin for Plugin {
         if let (Some(client), Some(runtime)) = (self.client.take(), self.runtime.as_ref()) {
             let _ = runtime.block_on(async { client.shutdown().await });
         }
-
         if let Some(runtime) = self.runtime.take() {
             runtime.shutdown_timeout(std::time::Duration::from_secs(30));
         }
@@ -102,11 +100,6 @@ impl GeyserPlugin for Plugin {
         slot: u64,
         is_startup: bool,
     ) -> PluginResult<()> {
-        let filter = match &self.accounts_filter {
-            Some(f) => f,
-            None => return Ok(()),
-        };
-
         if is_startup {
             if let Some(starting_slot) = self.starting_slot {
                 if slot < starting_slot {
@@ -114,6 +107,10 @@ impl GeyserPlugin for Plugin {
                 }
             }
         }
+        let filter = match &self.accounts_filter {
+            Some(f) => f,
+            None => return Ok(()),
+        };
 
         let account_info = match account {
             ReplicaAccountInfoVersions::V0_0_3(info) => info,
@@ -407,7 +404,7 @@ impl GeyserPlugin for Plugin {
 ///
 /// This function returns the GeyserPluginPostgres pointer as trait GeyserPlugin.
 pub unsafe extern "C" fn _create_plugin() -> *mut dyn GeyserPlugin {
-    let plugin = Plugin::default();
+    let plugin = JacanaPlugin::default();
     let plugin: Box<dyn GeyserPlugin> = Box::new(plugin);
     Box::into_raw(plugin)
 }

@@ -2,6 +2,7 @@
   "libpath": "./target/release/libjacana.dylib",
   "starting_slot": 0,
   "log_level": "info",
+  "runtime_threads": 8,
   "connection": {
     "host": "127.0.0.1",
     "port": 9000,

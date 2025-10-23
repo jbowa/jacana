@@ -201,6 +201,8 @@ pub struct Config {
     pub libpath: String,
     pub starting_slot: u64,
     pub batch: BatchCfg,
+    #[serde(default)]
+    pub runtime_threads: usize,
 }
 
 impl Config {

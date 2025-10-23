@@ -252,7 +252,7 @@ impl BlockWorker {
             id,
             pool,
             buffer,
-            metrics: Metrics::new(id),
+            metrics: Metrics::new(id, "block"),
             last_health_check: Instant::now(),
         })
     }

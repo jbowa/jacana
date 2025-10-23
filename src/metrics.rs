@@ -6,6 +6,7 @@ use {
 #[derive(Debug)]
 pub struct Metrics {
     pub worker_id: usize,
+    pub worker_type: &'static str,
     pub total_processed: AtomicU64,
     pub total_flushed: AtomicU64,
     pub flush_count: AtomicU64,
@@ -19,9 +20,10 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    pub fn new(worker_id: usize) -> Self {
+    pub fn new(worker_id: usize, worker_type: &'static str) -> Self {
         Self {
             worker_id,
+            worker_type,
             total_processed: AtomicU64::new(0),
             total_flushed: AtomicU64::new(0),
             flush_count: AtomicU64::new(0),
@@ -71,8 +73,8 @@ impl Metrics {
         };
 
         info!(
-          "worker {} stats: processed={}, flushed={}, flushes={}, errors={}, memory_pressure={}, connection_timeouts={}, avg_flush_us={}",
-          self.worker_id, processed, flushed, flush_count, errors, memory_pressure, connection_timeouts, avg_flush_duration
+          "{}-worker-{} stats: processed={}, flushed={}, flushes={}, errors={}, memory_pressure={}, connection_timeouts={}, avg_flush_us={}",
+          self.worker_type, self.worker_id, processed, flushed, flush_count, errors, memory_pressure, connection_timeouts, avg_flush_duration
       );
     }
 }

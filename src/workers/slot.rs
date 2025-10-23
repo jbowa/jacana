@@ -134,7 +134,7 @@ impl SlotWorker {
             id,
             pool,
             buffer,
-            metrics: Metrics::new(id),
+            metrics: Metrics::new(id, "slot"),
             last_health_check: Instant::now(),
         })
     }

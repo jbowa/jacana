@@ -278,7 +278,7 @@ impl TransactionWorker {
             id,
             pool,
             buffer,
-            metrics: Metrics::new(id),
+            metrics: Metrics::new(id, "transaction"),
             last_health_check: Instant::now(),
             total_balance_changes: Arc::new(AtomicU64::new(0)),
         })
