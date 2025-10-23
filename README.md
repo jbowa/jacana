@@ -8,7 +8,7 @@ Jacana eliminates the serialization overhead and row-wise conversion tax of trad
 
 ### Design Pattern: Staged Event-Driven Architecture (SEDA)
 
-Jacana implements a multi-stage pipeline with isolated worker pools, combining several proven concurrency patterns:
+Jacana implements a multi-stage pipeline with isolated worker pools.
 
 ```mermaid
 flowchart TD
@@ -53,7 +53,6 @@ Jacana uses [Kanal](https://github.com/fereidani/kanal) for inter-thread communi
 - **Stack-to-stack transfers**: For larger messages, direct memory copying eliminates heap allocations
 - **Optimized locking**: Specially tuned mutex designed for predictable channel lock times
 - **Bounded channels with backpressure**: Configurable buffer sizes prevent memory exhaustion
-- **Superior performance**: Outperforms standard Rust channels and matches Golang channel performance
 
 Kanal's efficiency is critical for Jacana's throughput, enabling millions of messages per second between Geyser callbacks and worker threads with minimal overhead.
 
