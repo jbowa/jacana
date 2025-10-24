@@ -343,7 +343,7 @@ With this config:
 
 ## Database Migration
 
-See [migrations/](migrations/) for scripts and instructions.
+See [migrations](migrations/) for scripts and instructions.
 
 ## Roadmap
 
